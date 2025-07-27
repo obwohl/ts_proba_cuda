@@ -1,11 +1,7 @@
 # --- Core ML & Data Handling ---
-# WICHTIG: Die verwendete GPU erfordert eine Nightly-Build von PyTorch.
-# Die folgenden Zeilen stellen sicher, dass die korrekte, für CUDA 12.1+
-# kompilierte Vorabversion installiert wird. Die Standard-torch-Zeile wird entfernt.
---extra-index-url https://download.pytorch.org/whl/nightly/cu121
---pre
 torch
-# numpy wird von torch benötigt, aber wir pinnen es nicht, um Konflikte zu vermeiden.
+torchvision
+torchaudio
 numpy
 pandas
 scikit-learn
@@ -15,7 +11,6 @@ einops # For tensor manipulation in models
 
 # --- Hyperparameter-Optimierung & Ausführung ---
 optuna
-ray # Wird oft zusammen mit Optuna für verteilte Suchen verwendet
 
 # --- Performance & Utilities ---
 tqdm # Fortschrittsbalken
