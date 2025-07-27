@@ -375,7 +375,8 @@ class DUETProb(ModelBase):
         self._build_model()
 
         
-        device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+        # Priorisiere CUDA > MPS > CPU. Das ist die logischere Reihenfolge.
+        device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
         self.model.to(device)
         
         print(f"--- Model Analysis ---\nTotal trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
@@ -693,21 +694,30 @@ class DUETProb(ModelBase):
                         epoch_loop.set_postfix(loss=f"{avg_epoch_loss:.4f}", norm_loss=f"{avg_epoch_norm_loss:.4f}")
 
 
-                        # === NEU: Periodische Speicherüberwachung für MPS ===
+                        # === KORREKTUR: Verallgemeinerte Speicherüberwachung für CUDA und MPS ===
                         current_time = time.time()
                         if trial and (current_time - last_memory_check_time) > current_memory_check_interval:
                             last_memory_check_time = current_time
-                            if torch.backends.mps.is_available():
-                                max_memory_gb = getattr(config, 'max_memory_gb', None)
-                                if max_memory_gb is not None:
+                            max_memory_gb = getattr(config, 'max_memory_gb', None)
+                            if max_memory_gb is not None:
+                                allocated_gb = 0
+                                device_type = device.type # Hole den Typ des aktiven Geräts
+
+                                if device_type == 'cuda':
+                                    allocated_gb = torch.cuda.memory_allocated(device) / (1024**3)
+                                    limit_type = "CUDA"
+                                elif device_type == 'mps':
                                     allocated_gb = torch.mps.driver_allocated_memory() / (1024**3)
+                                    limit_type = "MPS"
+                                
+                                if allocated_gb > 0: # Nur loggen, wenn eine Überwachung stattfindet
                                     tqdm.write(
                                         f"[Memory Check] Epoch {epoch+1}, Batch {i+1}: "
-                                        f"Allocated: {allocated_gb:.2f} GB / Limit: {max_memory_gb:.2f} GB"
+                                        f"Allocated ({limit_type}): {allocated_gb:.2f} GB / Limit: {max_memory_gb:.2f} GB"
                                     )
                                     if allocated_gb > max_memory_gb:
                                         tqdm.write(f"  -> 🚨 PRUNING: Memory limit exceeded. Trial will be stopped.")
-                                        raise optuna.exceptions.TrialPruned(f"Exceeded memory limit of {max_memory_gb} GB.")
+                                        raise optuna.exceptions.TrialPruned(f"Exceeded {limit_type} memory limit of {max_memory_gb} GB.")
                             
                             # Nach der ersten Prüfung auf das reguläre Intervall umschalten
                             current_memory_check_interval = regular_memory_check_interval_seconds

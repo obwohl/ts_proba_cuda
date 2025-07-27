@@ -1,11 +1,9 @@
 import numpy as np
-import numba
 from scipy.stats import ks_2samp
 import pandas as pd
 from tqdm import tqdm
 
 
-@numba.jit(nopython=True)
 def _calculate_slope(y: np.ndarray) -> float:
     """
     Berechnet die Steigung einer einfachen linearen Regression (y = mx + b)
@@ -106,15 +104,14 @@ def find_interesting_windows(
     trend_diffs = np.zeros((num_windows, num_channels))
     ks_dists = np.zeros((num_windows, num_channels))
 
-    @numba.jit(nopython=True, parallel=True)
     def calculate_trend_diffs(wb, wa, out_arr):
-        for i in numba.prange(num_windows):
+        for i in range(num_windows):
             for j in range(num_channels):
                 slope_before = _calculate_slope(wb[i, :, j])
                 slope_after = _calculate_slope(wa[i, :, j])
                 out_arr[i, j] = np.abs(slope_after - slope_before)
 
-    print(" -> Analyzing windows for trend reversals (Numba)...")
+    print(" -> Analyzing windows for trend reversals...")
     calculate_trend_diffs(windows_before, windows_after, trend_diffs)
 
     # Die KS-Distanz verwendet Scipy und kann nicht direkt in Numba nopython=True

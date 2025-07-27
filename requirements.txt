@@ -1,15 +1,29 @@
-darts==0.25.0
-matplotlib==3.7.5
-numpy==1.24.4
-pandas==1.5.3
-salesforce_merlion==2.0.2
-scikit_learn==1.3.2
-scipy==1.10.1
-statsmodels==0.14.1
-torch==2.4.1
-ray==2.10.0
-tqdm==4.66.4
-dash==2.17.0
-dash-bootstrap-components==1.6.0
-reformer-pytorch==1.4.4
-lightgbm==4.1.0
+# --- Core ML & Data Handling ---
+# WICHTIG: Die verwendete GPU erfordert eine Nightly-Build von PyTorch.
+# Die folgenden Zeilen stellen sicher, dass die korrekte, für CUDA 12.1+
+# kompilierte Vorabversion installiert wird. Die Standard-torch-Zeile wird entfernt.
+--extra-index-url https://download.pytorch.org/whl/nightly/cu121
+--pre
+torch
+# numpy wird von torch benötigt, aber wir pinnen es nicht, um Konflikte zu vermeiden.
+numpy
+pandas
+scikit-learn
+scipy
+statsmodels
+einops # For tensor manipulation in models
+
+# --- Hyperparameter-Optimierung & Ausführung ---
+optuna
+ray # Wird oft zusammen mit Optuna für verteilte Suchen verwendet
+
+# --- Performance & Utilities ---
+tqdm # Fortschrittsbalken
+Pillow # Für Bildverarbeitung (PIL)
+
+# --- Visualisierung & Logging ---
+matplotlib
+tensorboard # Für das Logging mit SummaryWriter
+
+# --- Analyse-Skripte ---
+scikit-posthocs # For statistical tests in analyze_hardest_windows.py
