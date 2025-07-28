@@ -6,6 +6,7 @@ figures/
 .git
 *.DS_Store
 venv/
+*.log
 
 # Python cache
 __pycache__/

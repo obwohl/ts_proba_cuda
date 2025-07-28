@@ -22,17 +22,17 @@ import uuid
 # Alles, was Sie anpassen müssen, ist hier an einem Ort.
 
 # -- Studien-Konfiguration --
-STUDY_NAME = "eisbach_airtemp_pressure_focus_auf_wassertemp_6"
+STUDY_NAME = "eisbach_grand_6"
 STORAGE_NAME = "sqlite:///optuna_study.db"  # Fester DB-Name. Studien werden intern durch STUDY_NAME unterschieden.
 
 # -- Parallelisierungs-Konfiguration --
 # Wie viele parallele Python-Prozesse (Trials) sollen gestartet werden?
-NUM_PARALLEL_TRIALS = 4
+NUM_PARALLEL_TRIALS = 2
 # Wie viele CPU-Worker soll JEDER Trial für den DataLoader verwenden?
-WORKERS_PER_TRIAL = 4
+WORKERS_PER_TRIAL = 8
 # NEU: Eine Verzögerung zwischen dem Start der Worker, um DB-Race-Conditions zu entschärfen.
 # Dies ist eine zusätzliche Sicherheitsmaßnahme zu den enqueued placeholder trials.
-DELAY_BETWEEN_WORKERS_S = 5
+DELAY_BETWEEN_WORKERS_S = 10
 
 # -- Warm-Start-Konfiguration --
 # Setze auf den Namen der alten Studie, von der die besten Trials übernommen werden sollen.

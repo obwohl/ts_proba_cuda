@@ -388,6 +388,21 @@ class DUETProb(ModelBase):
         self._tune_hyper_params(train_valid_data)
         config = self.config
 
+        # --- NEU: Pre-Flight-Check für den Optimierungs-Zielkanal ---
+        # Bricht den Lauf sofort ab, wenn der angegebene Kanal nicht existiert.
+        # Das spart Rechenzeit, da der Fehler nicht erst in der Validierungsschleife auffällt.
+        target_channel_check = getattr(config, 'optimization_target_channel', None)
+        if target_channel_check:
+            channel_names = list(config.channel_bounds.keys())
+            if target_channel_check not in channel_names:
+                raise ValueError(
+                    f"FATAL (Pre-Flight Check): Der Optimierungs-Zielkanal '{target_channel_check}' wurde in der Konfiguration angegeben, "
+                    f"aber nicht in der Liste der verfügbaren Datenkanäle gefunden: {channel_names}. "
+                    "Der Trial wird sofort abgebrochen, um Ressourcen zu sparen."
+                )
+            else:
+                print(f"\n--- INFO: Optimierungs-Zielkanal '{target_channel_check}' wurde in den Datenkanälen gefunden und wird für die Validierung verwendet. ---\n")
+
         # Priorisiere einen existierenden log_dir aus der Konfiguration (vom Benchmark-Runner gesetzt).
         # Wenn nicht vorhanden, erstelle einen Standard-Ordner. Dies zentralisiert die Ausgabe.
         log_dir = getattr(config, 'log_dir', f'runs/{self.model_name}_{int(time.time())}')
@@ -827,19 +842,29 @@ class DUETProb(ModelBase):
                         writer.add_scalar(f"Loss_per_Channel/Validation_{name}", avg_channel_loss, epoch)
 
                     # --- NEU: Logik zur Auswahl der Optimierungsmetrik ---
+                    # Diese Logik ist jetzt robust: Sie bricht bei einer Fehlkonfiguration ab,
+                    # anstatt stillschweigend auf einen Fallback umzuschalten.
                     target_channel = getattr(self.config, 'optimization_target_channel', None)
-                    losses_for_optimization = None
-                    
-                    if target_channel and target_channel in channel_names:
-                        try:
-                            target_idx = channel_names.index(target_channel)
-                            losses_for_optimization = all_window_losses_denorm[:, target_idx]
-                        except ValueError:
-                            tqdm.write(f"WARNUNG: Zielkanal '{target_channel}' nicht gefunden. Nutze Durchschnitt.")
-                            target_channel = None # Reset to trigger fallback
-                    
-                    if losses_for_optimization is None: # Fallback oder Standardverhalten
+                    optimization_target_name_for_log = "" # Für die Log-Nachricht
+
+                    if target_channel:
+                        # Ein spezifischer Kanal wurde für die Optimierung angefordert.
+                        if target_channel not in channel_names:
+                            # Dies ist ein kritischer Konfigurationsfehler. Breche sofort ab.
+                            raise ValueError(
+                                f"FATAL: Der Optimierungs-Zielkanal '{target_channel}' wurde angegeben, "
+                                f"aber nicht in der Liste der verfügbaren Datenkanäle gefunden: {channel_names}. "
+                                "Bitte auf Tippfehler oder Probleme in der Daten-Pipeline prüfen."
+                            )
+                        
+                        # Kanal gefunden, fahre mit der Extraktion der Verluste fort.
+                        target_idx = channel_names.index(target_channel)
+                        losses_for_optimization = all_window_losses_denorm[:, target_idx]
+                        optimization_target_name_for_log = f"Kanal '{target_channel}'"
+                    else:
+                        # Standardverhalten: Kein spezifischer Kanal angefordert, nutze den Durchschnitt über alle Kanäle.
                         losses_for_optimization = all_window_losses_denorm.mean(axis=1)
+                        optimization_target_name_for_log = "Durchschnitt aller Kanäle"
 
                     # --- Berechne die Metriken für die Optimierung UND für das Logging ---
                     avg_metric_for_opt = np.mean(losses_for_optimization)
@@ -871,12 +896,8 @@ class DUETProb(ModelBase):
                     writer.add_scalar(f"Loss_Optimized/Validation_Metric", metric_for_optimization, epoch)
 
                     # 3. Gib die Metriken in der Konsole aus und hebe die aktive hervor.
-                    log_msg = f"Epoch {epoch + 1} Validation | Overall Avg CRPS: {overall_avg_crps:.6f} | "
-                    if target_channel:
-                        log_msg += f"Target ('{target_channel}') {metric_name_for_logging}: {metric_for_optimization:.6f} | "
-                    else:
-                        log_msg += f"Global {metric_name_for_logging}: {metric_for_optimization:.6f} | "
-                    log_msg += "--> Using this for Early Stopping."
+                    log_msg = (f"Epoch {epoch + 1} Validation | Overall Avg CRPS: {overall_avg_crps:.6f} | "
+                               f"Optimierungs-Metrik ({optimization_target_name_for_log}): {metric_name_for_logging} = {metric_for_optimization:.6f} --> Für Early Stopping & Pruning verwendet.")
                     tqdm.write(log_msg)
 
                     # Speichere den alten besten Loss, um eine Verbesserung zu erkennen
@@ -886,7 +907,10 @@ class DUETProb(ModelBase):
 
                     # 5. Verwende die ausgewählte Metrik für das Optuna Pruning.
                     if trial:
-                        trial.set_user_attr("optimization_target_channel", target_channel)
+                        # Setze das Attribut, das widerspiegelt, was TATSÄCHLICH optimiert wurde.
+                        # Wenn target_channel None ist, wird der Durchschnitt aller Kanäle verwendet.
+                        actual_target = target_channel if target_channel else "all_channels_mean"
+                        trial.set_user_attr("optimization_target_channel", actual_target)
                         # NEU: Melde die Metrik mit der aktuellen Epochennummer als Schritt.
                         trial.report(metric_for_optimization, epoch)
                         if trial.should_prune():

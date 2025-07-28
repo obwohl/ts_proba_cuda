@@ -13,8 +13,6 @@ import gc
 from optuna.pruners import HyperbandPruner
 import pandas as pd
 
-# Direkter Import der notwendigen Klassen
-# Importiere die Modellklasse UND die CVaR-Hilfsfunktion aus der Modelldatei
 from ts_benchmark.baselines.duet.duet_prob import DUETProb, calculate_cvar
 from ts_benchmark.data.data_source import LocalForecastingDataSource
 from ts_benchmark.baselines.utils import forecasting_data_provider, train_val_split
@@ -31,7 +29,7 @@ logging.getLogger("optuna").setLevel(logging.INFO)
 
 # --- 2. Feste Trainingsparameter für die lange, intensive Suche ---
 FIXED_PARAMS = {
-    "data_file": "eisbach_airtemp96_pressure96.csv", 
+    "data_file": "combo_new.csv", 
     "horizon": 96,
     "train_ratio_in_tv": 0.8, # NEU: Split-Verhältnis explizit gemacht
     # --- NEU: Wähle die zu optimierende Metrik ---
@@ -67,11 +65,11 @@ FIXED_PARAMS = {
     #     [1, 1, 1, 1, 1, 1],
     #     [1, 1, 1, 1, 1, 1], 
     # ] für isarpegel
-    "channel_adjacency_prior": [
-        [1, 1, 1],  #wassertemp
-        [0, 1, 1], #airtemp96
-        [0, 0, 1], #pressure96
-    ]
+    # "channel_adjacency_prior": [
+    #     [1, 1, 1],  #wassertemp
+    #     [0, 1, 1], #airtemp96
+    #     [0, 0, 1], #pressure96
+    # ]
 }
 
 def get_suggested_params(trial: optuna.Trial) -> dict:
@@ -208,25 +206,25 @@ def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
              print(f"TRIAL #{trial_num} resulted in invalid losses. Pruning.")
              raise optuna.exceptions.TrialPruned("Training did not produce a valid finite loss.")
 
-        # --- KORREKTUR: Repliziere die Metrik-Berechnungslogik aus dem Training ---
+        # --- FINALE METRIK-BERECHNUNG: Robuste Logik, die bei Fehlkonfiguration abbricht ---
         target_channel = model_hyper_params.get("optimization_target_channel")
-        losses_for_final_metric = None
-        
-        if target_channel:
-            try:
-                channel_names = list(model.config.channel_bounds.keys())
-                target_idx = channel_names.index(target_channel)
-                # Nimm die Verluste nur für den Zielkanal. Shape: [num_windows]
-                losses_for_final_metric = all_window_losses[:, target_idx]
-                print(f"  -> Calculating final metrics for target channel: '{target_channel}'")
-            except (ValueError, AttributeError):
-                print(f"  -> WARNUNG: Zielkanal '{target_channel}' nicht gefunden. Nutze Durchschnitt über alle Kanäle.")
-                target_channel = None # Fallback
+        channel_names = list(model.config.channel_bounds.keys())
 
-        if losses_for_final_metric is None:
-            # Standardverhalten: Mittelwert der Verluste über alle Kanäle pro Fenster
-            # Shape: [num_windows]
+        if target_channel:
+            if target_channel not in channel_names:
+                # Dies sollte durch die Prüfung im Training bereits abgefangen werden,
+                # aber als doppelte Sicherheit wird der Trial hier als fehlerhaft markiert.
+                raise ValueError(
+                    f"FATAL (final validation): Optimization target channel '{target_channel}' not found "
+                    f"in available channels: {channel_names}."
+                )
+            target_idx = channel_names.index(target_channel)
+            losses_for_final_metric = all_window_losses[:, target_idx]
+            final_target_name = target_channel
+            print(f"  -> Calculating final metrics for target channel: '{final_target_name}'")
+        else:
             losses_for_final_metric = all_window_losses.mean(axis=1)
+            final_target_name = "all_channels_mean"
             print("  -> Calculating final metrics based on the mean loss across all channels per window.")
 
         # Berechne die beiden Zielmetriken auf dem korrekten Datensatz
@@ -236,7 +234,7 @@ def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
         # Speichere beide Metriken als User-Attribute, damit sie immer verfügbar sind
         trial.set_user_attr("avg_crps", avg_crps)
         trial.set_user_attr("cvar_crps", cvar_crps)
-        trial.set_user_attr("final_optimization_target", target_channel if target_channel else "all_channels_mean")
+        trial.set_user_attr("final_optimization_target", final_target_name)
 
         # Logge die finalen Metriken übersichtlich
         cvar_alpha = model_hyper_params["cvar_alpha"]
