@@ -218,19 +218,41 @@ def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
              print(f"TRIAL #{trial_num} resulted in invalid losses. Pruning.")
              raise optuna.exceptions.TrialPruned("Training did not produce a valid finite loss.")
 
-        # Berechne die beiden Zielmetriken
-        avg_crps = float(np.mean(all_window_losses))
-        cvar_crps = calculate_cvar(all_window_losses, model_hyper_params["cvar_alpha"])
+        # --- KORREKTUR: Repliziere die Metrik-Berechnungslogik aus dem Training ---
+        target_channel = model_hyper_params.get("optimization_target_channel")
+        losses_for_final_metric = None
+        
+        if target_channel:
+            try:
+                channel_names = list(model.config.channel_bounds.keys())
+                target_idx = channel_names.index(target_channel)
+                # Nimm die Verluste nur für den Zielkanal. Shape: [num_windows]
+                losses_for_final_metric = all_window_losses[:, target_idx]
+                print(f"  -> Calculating final metrics for target channel: '{target_channel}'")
+            except (ValueError, AttributeError):
+                print(f"  -> WARNUNG: Zielkanal '{target_channel}' nicht gefunden. Nutze Durchschnitt über alle Kanäle.")
+                target_channel = None # Fallback
+
+        if losses_for_final_metric is None:
+            # Standardverhalten: Mittelwert der Verluste über alle Kanäle pro Fenster
+            # Shape: [num_windows]
+            losses_for_final_metric = all_window_losses.mean(axis=1)
+            print("  -> Calculating final metrics based on the mean loss across all channels per window.")
+
+        # Berechne die beiden Zielmetriken auf dem korrekten Datensatz
+        avg_crps = float(np.mean(losses_for_final_metric))
+        cvar_crps = calculate_cvar(losses_for_final_metric, model_hyper_params["cvar_alpha"])
 
         # Speichere beide Metriken als User-Attribute, damit sie immer verfügbar sind
         trial.set_user_attr("avg_crps", avg_crps)
         trial.set_user_attr("cvar_crps", cvar_crps)
+        trial.set_user_attr("final_optimization_target", target_channel if target_channel else "all_channels_mean")
 
         # Logge die finalen Metriken übersichtlich
         cvar_alpha = model_hyper_params["cvar_alpha"]
         print("\n" + "-"*25 + f" TRIAL #{trial_num} FINAL METRICS " + "-"*25)
-        print(f"  -> Avg CRPS : {avg_crps:.6f}")
-        print(f"  -> CVaR@{cvar_alpha} CRPS: {cvar_crps:.6f}")
+        print(f"  -> Avg CRPS (on selected losses): {avg_crps:.6f}")
+        print(f"  -> CVaR@{cvar_alpha} CRPS (on selected losses): {cvar_crps:.6f}")
         print("-"*(50 + len(str(trial_num)) + 18) + "\n")
 
         # Gib die ausgewählte Zielmetrik für die Optimierung zurück

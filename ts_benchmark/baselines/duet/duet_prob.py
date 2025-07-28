@@ -841,19 +841,28 @@ class DUETProb(ModelBase):
                     if losses_for_optimization is None: # Fallback oder Standardverhalten
                         losses_for_optimization = all_window_losses_denorm.mean(axis=1)
 
-                    # --- Berechne die Metriken basierend auf den ausgewählten Verlusten ---
+                    # --- Berechne die Metriken für die Optimierung UND für das Logging ---
                     avg_metric_for_opt = np.mean(losses_for_optimization)
                     cvar_metric_for_opt = calculate_cvar(losses_for_optimization, self.config.cvar_alpha)
 
-                    # --- Logge die globalen Metriken weiterhin zur Beobachtung ---
+                    # --- Logge die globalen Metriken (über alle Kanäle gemittelt) zur Beobachtung ---
                     overall_avg_crps = np.mean(all_window_losses_denorm)
+                    overall_cvar_crps = calculate_cvar(all_window_losses_denorm.mean(axis=1), self.config.cvar_alpha)
                     writer.add_scalar("Loss/Validation_Overall_Avg_CRPS", overall_avg_crps, epoch)
+                    writer.add_scalar("Loss/Validation_Overall_CVaR_CRPS", overall_cvar_crps, epoch)
                     writer.add_scalar("Loss_Normalized/Validation_Avg_CRPS", np.mean(all_window_losses_norm), epoch)
+
+                    # --- NEU: Logge die spezifischen Metriken des Zielkanals, falls vorhanden ---
+                    if target_channel and target_channel in channel_names:
+                        # In diesem Fall sind die "Optimierungsmetriken" genau die des Zielkanals.
+                        writer.add_scalar(f"Loss_Target_{target_channel}/Validation_Avg_CRPS", avg_metric_for_opt, epoch)
+                        writer.add_scalar(f"Loss_Target_{target_channel}/Validation_CVaR_CRPS", cvar_metric_for_opt, epoch)
+
 
                     # 2. Wähle die Metrik für die Optimierung basierend auf der Konfiguration.
                     if self.config.optimization_metric == 'cvar':
                         metric_for_optimization = cvar_metric_for_opt
-                        metric_name_for_logging = f"CVaR@{self.config.cvar_alpha}"
+                        metric_name_for_logging = f"CVaR@{self.config.cvar_alpha:.2f}"
                     else:  # Standard ist der Durchschnitts-CRPS
                         metric_for_optimization = avg_metric_for_opt
                         metric_name_for_logging = "Avg CRPS"
