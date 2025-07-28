@@ -33,6 +33,25 @@ from ...models.model_base import ModelBase
 # Dies verhindert, dass die teure Suche in jedem Optuna-Trial neu ausgeführt wird.
 WINDOW_SEARCH_CACHE = {}
 
+def calculate_cvar(losses: np.ndarray, alpha: float) -> float:
+    """Berechnet den Conditional Value at Risk (CVaR)."""
+    if not isinstance(losses, np.ndarray):
+        losses = np.array(losses)
+    
+    if losses.size == 0:
+        return float('nan')
+
+    # 1. Finde den Schwellenwert (VaR)
+    var = np.quantile(losses, 1 - alpha)
+    # 2. Berechne den Durchschnitt aller Verluste, die größer oder gleich dem VaR sind
+    tail_losses = losses[losses >= var]
+
+    # Handle edge case where no losses are in the tail (e.g., empty input)
+    if tail_losses.size == 0:
+        return float('nan')
+
+    return float(tail_losses.mean())
+
 def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
     """
     Implementiert Adaptive Gradient Clipping (AGC) wie in "High-Performance Large-Scale Image Recognition Without Normalization" beschrieben.
@@ -126,6 +145,10 @@ class TransformerConfig:
 
             # --- NEW: Performance Profiling ---
             "profile_epoch": None, # Set to an epoch number (e.g., 2) to enable profiling for that epoch.
+            # NEU: Frequenz für die Aktualisierung der tqdm-Fortschrittsanzeige (jeder n-te Batch)
+            "tqdm_update_freq": 10,
+            # NEU: Mindestintervall in Sekunden für die Aktualisierung des tqdm-Balkens, um I/O-Spam zu reduzieren
+            "tqdm_min_interval": 1.0,
         }
 
         for key, value in defaults.items():
@@ -514,7 +537,8 @@ class DUETProb(ModelBase):
                     train_data_loader,
                     desc=f"Epoch {epoch + 1}/{config.num_epochs}",
                     leave=False, # Verhindert, dass für jede Epoche eine Zeile übrig bleibt
-                    file=sys.stdout # Stellt sicher, dass die Ausgabe in der Konsole landet
+                    file=sys.stdout, # Stellt sicher, dass die Ausgabe in der Konsole landet
+                    mininterval=config.tqdm_min_interval # NEU: Kontrolliert die Update-Frequenz des Balkens
                 )
 
                 # --- VERBESSERUNG: Laufende Summen für den tqdm-Fortschrittsbalken ---
@@ -689,10 +713,13 @@ class DUETProb(ModelBase):
                         # Wir berechnen und zeigen den laufenden Durchschnitt des Losses für die aktuelle Epoche an.
                         epoch_total_loss_sum += total_loss.item()
                         epoch_norm_loss_sum += normalized_loss.item()
-                        avg_epoch_loss = epoch_total_loss_sum / (i + 1)
-                        avg_epoch_norm_loss = epoch_norm_loss_sum / (i + 1)
-                        epoch_loop.set_postfix(loss=f"{avg_epoch_loss:.4f}", norm_loss=f"{avg_epoch_norm_loss:.4f}")
 
+                        # NEU: Aktualisiere die Fortschrittsanzeige nur alle `tqdm_update_freq` Batches
+                        # oder beim letzten Batch der Epoche, um den finalen Stand zu sehen.
+                        if (i + 1) % config.tqdm_update_freq == 0 or (i + 1) == len(train_data_loader):
+                            avg_epoch_loss = epoch_total_loss_sum / (i + 1)
+                            avg_epoch_norm_loss = epoch_norm_loss_sum / (i + 1)
+                            epoch_loop.set_postfix(loss=f"{avg_epoch_loss:.4f}", norm_loss=f"{avg_epoch_norm_loss:.4f}")
 
                         # === KORREKTUR: Verallgemeinerte Speicherüberwachung für CUDA und MPS ===
                         current_time = time.time()
@@ -789,23 +816,72 @@ class DUETProb(ModelBase):
 
                 # --- Validierung ---
                 if valid_data_loader is not None:
-                    # GEÄNDERT: validate wird writer und epoch übergeben, um intern zu loggen
-                    valid_loss_denorm, valid_loss_norm = self.validate(valid_data_loader, writer, epoch, device, desc=f"Epoch {epoch+1} Validation")
-                    writer.add_scalar("Loss/Validation_CRPS", valid_loss_denorm, epoch)
-                    writer.add_scalar("Loss_Normalized/Validation_CRPS", valid_loss_norm, epoch)
+                    # 1. Validiere einmal, um die Verluste pro Kanal und pro Fenster zu erhalten.
+                    # all_window_losses_denorm hat jetzt die Form [num_windows, num_channels]
+                    all_window_losses_denorm, all_window_losses_norm = self.validate(valid_data_loader, writer, epoch, device, desc=f"Epoch {epoch+1} Validation")
                     
+                    # --- NEU: Logge die denormalisierten Verluste pro Kanal ---
+                    channel_names = list(self.config.channel_bounds.keys())
+                    for i, name in enumerate(channel_names):
+                        avg_channel_loss = np.mean(all_window_losses_denorm[:, i])
+                        writer.add_scalar(f"Loss_per_Channel/Validation_{name}", avg_channel_loss, epoch)
+
+                    # --- NEU: Logik zur Auswahl der Optimierungsmetrik ---
+                    target_channel = getattr(self.config, 'optimization_target_channel', None)
+                    losses_for_optimization = None
+                    
+                    if target_channel and target_channel in channel_names:
+                        try:
+                            target_idx = channel_names.index(target_channel)
+                            losses_for_optimization = all_window_losses_denorm[:, target_idx]
+                        except ValueError:
+                            tqdm.write(f"WARNUNG: Zielkanal '{target_channel}' nicht gefunden. Nutze Durchschnitt.")
+                            target_channel = None # Reset to trigger fallback
+                    
+                    if losses_for_optimization is None: # Fallback oder Standardverhalten
+                        losses_for_optimization = all_window_losses_denorm.mean(axis=1)
+
+                    # --- Berechne die Metriken basierend auf den ausgewählten Verlusten ---
+                    avg_metric_for_opt = np.mean(losses_for_optimization)
+                    cvar_metric_for_opt = calculate_cvar(losses_for_optimization, self.config.cvar_alpha)
+
+                    # --- Logge die globalen Metriken weiterhin zur Beobachtung ---
+                    overall_avg_crps = np.mean(all_window_losses_denorm)
+                    writer.add_scalar("Loss/Validation_Overall_Avg_CRPS", overall_avg_crps, epoch)
+                    writer.add_scalar("Loss_Normalized/Validation_Avg_CRPS", np.mean(all_window_losses_norm), epoch)
+
+                    # 2. Wähle die Metrik für die Optimierung basierend auf der Konfiguration.
+                    if self.config.optimization_metric == 'cvar':
+                        metric_for_optimization = cvar_metric_for_opt
+                        metric_name_for_logging = f"CVaR@{self.config.cvar_alpha}"
+                    else:  # Standard ist der Durchschnitts-CRPS
+                        metric_for_optimization = avg_metric_for_opt
+                        metric_name_for_logging = "Avg CRPS"
+
+                    # Logge die tatsächlich verwendete Optimierungsmetrik
+                    writer.add_scalar(f"Loss_Optimized/Validation_Metric", metric_for_optimization, epoch)
+
+                    # 3. Gib die Metriken in der Konsole aus und hebe die aktive hervor.
+                    log_msg = f"Epoch {epoch + 1} Validation | Overall Avg CRPS: {overall_avg_crps:.6f} | "
+                    if target_channel:
+                        log_msg += f"Target ('{target_channel}') {metric_name_for_logging}: {metric_for_optimization:.6f} | "
+                    else:
+                        log_msg += f"Global {metric_name_for_logging}: {metric_for_optimization:.6f} | "
+                    log_msg += "--> Using this for Early Stopping."
+                    tqdm.write(log_msg)
+
                     # Speichere den alten besten Loss, um eine Verbesserung zu erkennen
                     old_best_loss = self.early_stopping.val_loss_min
-                    
-                    self.early_stopping(valid_loss_denorm, self.model.state_dict())
+                    # 4. Verwende die ausgewählte Metrik für Early Stopping.
+                    self.early_stopping(metric_for_optimization, self.model.state_dict())
 
-                    # --- NEU: Optuna Pruning-Logik, jetzt am Ende der Epoche ---
+                    # 5. Verwende die ausgewählte Metrik für das Optuna Pruning.
                     if trial:
-                        elapsed_time_since_start = time.time() - start_time
-                        # Melde den Validierungs-Loss und die vergangene Zeit an Optuna
-                        trial.report(valid_loss_denorm, elapsed_time_since_start)
+                        trial.set_user_attr("optimization_target_channel", target_channel)
+                        # NEU: Melde die Metrik mit der aktuellen Epochennummer als Schritt.
+                        trial.report(metric_for_optimization, epoch)
                         if trial.should_prune():
-                            print(f"  -> Trial pruned by {trial.study.pruner.__class__.__name__} after epoch {epoch + 1}.")
+                            tqdm.write(f"  -> Trial pruned by {trial.study.pruner.__class__.__name__} after epoch {epoch + 1}.")
                             raise optuna.exceptions.TrialPruned()
                     
                     # === NEU: Führe speicherintensive Plots nur aus, wenn explizit aktiviert ===
@@ -834,7 +910,7 @@ class DUETProb(ModelBase):
                         print("Early stopping triggered.")
                         break
                     
-                    if scheduler: scheduler.step(valid_loss_denorm)
+                    if scheduler: scheduler.step(metric_for_optimization)
 
                 if config.lradj != "plateau":
                     # Silencing the learning rate update to reduce terminal clutter
@@ -871,15 +947,16 @@ class DUETProb(ModelBase):
             self.load(self.checkpoint_path)
         return self
 
-    def validate(self, valid_data_loader, writer: SummaryWriter, epoch: int, device: torch.device, desc: str = "Validation") -> tuple[float, float]:
-        total_denorm_loss, total_norm_loss = [], []
+    def validate(self, valid_data_loader, writer: Optional[SummaryWriter], epoch: Optional[int], device: torch.device, desc: str = "Validation") -> tuple[np.ndarray, np.ndarray]:
+        all_denorm_losses, all_norm_losses = [], []
         self.model.eval()
         with torch.no_grad():
             validation_loop = tqdm(
                 valid_data_loader,
                 desc=desc,
                 leave=False,
-                file=sys.stdout
+                file=sys.stdout,
+                mininterval=self.config.tqdm_min_interval # NEU: Kontrolliert die Update-Frequenz des Balkens
             )
             for batch in validation_loop:
                 # Der Provider gibt jetzt 4 Elemente zurück. Wir ignorieren die Zeit-Features.
@@ -894,21 +971,28 @@ class DUETProb(ModelBase):
                 
                 # Berechne den denormalisierten Loss für EarlyStopping/Optuna
                 # crps_loss erwartet target in [B, N_vars, H]
-                denorm_loss = crps_loss(denorm_distr, target_horizon.permute(0, 2, 1)).mean()
-                total_denorm_loss.append(denorm_loss.item())
+                # Wir berechnen den mittleren CRPS pro Kanal pro Sample im Batch -> [B, N_vars]
+                denorm_loss_per_sample = crps_loss(denorm_distr, target_horizon.permute(0, 2, 1)).mean(dim=2)
+                all_denorm_losses.append(denorm_loss_per_sample.cpu().numpy())
 
                 # Berechne den normalisierten Loss für das Logging
                 norm_target = denorm_distr.normalize_value(target_horizon).permute(0, 2, 1)
-                norm_loss = crps_loss(base_distr, norm_target).mean()
-                total_norm_loss.append(norm_loss.item())
+                norm_loss_per_sample = crps_loss(base_distr, norm_target).mean(dim=2)
+                all_norm_losses.append(norm_loss_per_sample.cpu().numpy())
 
-                validation_loop.set_postfix(
-                    denorm_crps=np.mean(total_denorm_loss),
-                    norm_crps=np.mean(total_norm_loss)
-                )
+                # Update tqdm bar with the running mean of all collected losses so far
+                if all_denorm_losses:
+                    # Berechne den Gesamt-Durchschnitt über alle Fenster und Kanäle
+                    running_mean_denorm = np.mean(np.concatenate(all_denorm_losses)) 
+                    running_mean_norm = np.mean(np.concatenate(all_norm_losses))
+                    validation_loop.set_postfix(
+                        denorm_crps=running_mean_denorm,
+                        norm_crps=running_mean_norm
+                    )
 
         self.model.train()
-        return np.mean(total_denorm_loss), np.mean(total_norm_loss)
+        # Wir geben die vollständigen Arrays aller Fenster-Losses zurück
+        return np.concatenate(all_denorm_losses), np.concatenate(all_norm_losses)
 
     def forecast(self, horizon: int, train: pd.DataFrame) -> np.ndarray:
         if self.model is None:

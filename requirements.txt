@@ -1,4 +1,9 @@
 # --- Core ML & Data Handling ---
+# WICHTIG: Die verwendete GPU (sm_120) erfordert einen spezifischen Nightly-Build.
+# Die folgenden Zeilen stellen sicher, dass die korrekte, für CUDA 12.9+
+# kompilierte Vorabversion installiert wird.
+--extra-index-url https://download.pytorch.org/whl/nightly/cu129
+--pre
 torch
 torchvision
 torchaudio

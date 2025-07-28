@@ -16,6 +16,25 @@ def _compiled_esn_loop(x: torch.Tensor, h: torch.Tensor, W_res: torch.Tensor, W_
         h = (1 - leak_rate) * h + leak_rate * torch.tanh(h @ W_res.T + u_t @ W_in.T)
     return h
 
+@torch.jit.script
+def _approximate_spectral_radius(W: torch.Tensor, num_iterations: int = 20) -> torch.Tensor:
+    """
+    Approximiert den Spektralradius (Betrag des größten Eigenwerts) einer Matrix
+    effizient mit der Power-Iteration-Methode. Dies ist deutlich schneller als
+    die Berechnung aller Eigenwerte mit `torch.linalg.eigvals`.
+    """
+    b_k = torch.randn(W.shape[1], device=W.device)
+    for _ in range(num_iterations):
+        # Berechne das Matrix-Vektor-Produkt
+        b_k1 = W @ b_k
+        # Berechne die Norm
+        b_k1_norm = torch.norm(b_k1)
+        # Normalisiere den Vektor für die nächste Iteration
+        b_k = b_k1 / (b_k1_norm + 1e-9)
+
+    spectral_radius = torch.norm(W @ b_k)
+    return spectral_radius
+
 class BaseReservoirExpert(nn.Module, ABC):
     """
     Abstrakte Basisklasse für ESN-Experten.
@@ -47,16 +66,13 @@ class BaseReservoirExpert(nn.Module, ABC):
         zero_indices = torch.randperm(self.reservoir_size * self.reservoir_size)[:num_zeros]
         W_res.view(-1)[zero_indices] = 0
 
-        try:
-            # Berechne die Eigenwerte auf dem Gerät, auf dem der Tensor liegt.
-            # Das explizite .to('cpu') wird entfernt, um die Kompatibilität mit
-            # Backends wie MPS zu verbessern, wo diese Operation unterstützt wird.
-            eigenvalues = torch.linalg.eigvals(W_res)
-            current_spectral_radius = torch.max(torch.abs(eigenvalues))
-            if current_spectral_radius > 1e-9:
-                W_res.mul_(self.spectral_radius_target / current_spectral_radius)
-        except torch.linalg.LinAlgError:
-            print("Warnung: Eigenwertberechnung für ESN-Reservoir fehlgeschlagen. Überspringe Skalierung.")
+        # --- OPTIMIERUNG: Ersetze die langsame, exakte Eigenwertberechnung ---
+        # durch die schnelle Power-Iteration-Approximation. Dies beschleunigt die
+        # Modellinitialisierung erheblich, was besonders bei Optuna-Suchen mit
+        # vielen Trials vorteilhaft ist.
+        current_spectral_radius = _approximate_spectral_radius(W_res)
+        if current_spectral_radius > 1e-9:
+            W_res.mul_(self.spectral_radius_target / current_spectral_radius)
 
         self.register_buffer('W_res', W_res)
 

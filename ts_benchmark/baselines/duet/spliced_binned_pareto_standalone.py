@@ -7,6 +7,41 @@ import torch.nn.functional as F
 from torch.distributions import Distribution, constraints
 from torch.distributions.utils import broadcast_all
 
+@torch.jit.script
+def _compiled_icdf_vector_loop(
+    quantiles: torch.Tensor,
+    bin_cdfs: torch.Tensor,
+    bin_probs: torch.Tensor,
+    bin_edges: torch.Tensor,
+    bin_width: float,
+    num_bins: int
+) -> torch.Tensor:
+    """
+    JIT-kompilierte Funktion für die speichereffiziente, aber rechenintensive
+    Schleife über die Quantile. Dies wird für die CRPS-Berechnung verwendet.
+    Durch die Kompilierung wird der Python-Overhead pro Quantil eliminiert.
+    """
+    results_per_quantile = []
+    cdf_start_padded = F.pad(bin_cdfs, (1, 0), 'constant', 0.0)[..., :-1]
+
+    for q in quantiles:
+        bin_indices = torch.sum(bin_cdfs < q, dim=-1)
+        bin_indices = torch.clamp(bin_indices, 0, num_bins - 1)
+        
+        indices_for_gather = bin_indices.unsqueeze(-1)
+
+        prob_in_bin = torch.gather(bin_probs, -1, indices_for_gather).squeeze(-1)
+        cdf_start_of_bin = torch.gather(cdf_start_padded, -1, indices_for_gather).squeeze(-1)
+        lower_edge = bin_edges[indices_for_gather].squeeze(-1)
+        
+        numerator = q - cdf_start_of_bin
+        safe_prob_in_bin = torch.clamp(prob_in_bin, min=1e-9)
+        frac_in_bin = torch.clamp(numerator / safe_prob_in_bin, 0.0, 1.0)
+        icdf_binned_for_q = lower_edge + frac_in_bin * bin_width
+        results_per_quantile.append(icdf_binned_for_q)
+
+    return torch.stack(results_per_quantile, dim=-1)
+
 class SplicedBinnedPareto(Distribution):
     arg_constraints = {
         "lower_gp_xi": constraints.real, "lower_gp_beta": constraints.positive,
@@ -49,20 +84,22 @@ class SplicedBinnedPareto(Distribution):
         is_vector_input = quantiles.dim() < len(self.batch_shape)
         
         if is_vector_input:
-            # Pfad für crps_loss: quantiles ist ein Vektor, z.B. shape [99]
-            # Dieser Pfad war bereits korrekt.
-            cdfs_view = bin_cdfs.unsqueeze(-1)
-            quantiles_view = quantiles.view((1,) * len(self.batch_shape) + (1, -1))
+            # --- OPTIMIERUNG: Rufe die JIT-kompilierte Funktion auf ---
+            # Anstatt die Schleife in langsamem Python auszuführen, übergeben wir
+            # alle notwendigen Tensoren an die kompilierte Funktion.
+            icdf_binned = _compiled_icdf_vector_loop(
+                quantiles,
+                bin_cdfs,
+                bin_probs,
+                self.bin_edges,
+                self._bin_width,
+                self.num_bins
+            )
+            q_bcast = quantiles.view((1,) * len(self.batch_shape) + (-1,)).expand_as(icdf_binned)
             
-            bin_indices_exp = torch.sum(cdfs_view < quantiles_view, dim=-2)
-            bin_indices = bin_indices_exp.squeeze(-2)
-            bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
-            
-            q_bcast = quantiles.view((1,) * len(self.batch_shape) + (-1,)).expand(self.batch_shape + (-1,))
-            indices_for_gather = bin_indices
         else:
             # Pfad für __init__: quantiles hat die volle Batch-Form, z.B. shape [B, H, V]
-            # HIER WAR DER FEHLER.
+            # HIER WAR DER FEHLER bezüglich der Tensor-Dimensionen.
             q_bcast = quantiles
             
             q_exp = q_bcast.unsqueeze(-1)
@@ -72,28 +109,28 @@ class SplicedBinnedPareto(Distribution):
             # Dies erzeugt einen Tensor der Form [B, H, V, 1]
             indices_for_gather = bin_indices.unsqueeze(-1)
 
-        prob_in_bin = torch.gather(bin_probs, -1, indices_for_gather)
-        cdf_start_padded = F.pad(bin_cdfs, (1, 0), 'constant', 0.0)[..., :-1]
-        cdf_start_of_bin = torch.gather(cdf_start_padded, -1, indices_for_gather)
-        lower_edge = self.bin_edges[indices_for_gather]
+            prob_in_bin = torch.gather(bin_probs, -1, indices_for_gather)
+            cdf_start_padded = F.pad(bin_cdfs, (1, 0), 'constant', 0.0)[..., :-1]
+            cdf_start_of_bin = torch.gather(cdf_start_padded, -1, indices_for_gather)
+            lower_edge = self.bin_edges[indices_for_gather]
 
-        # ##################################################################################
-        # ## KORREKTURBLOCK ##
-        # Im __init__-Pfad (wenn is_vector_input=False) hatten die gather-Operationen
-        # eine überflüssige Dimension am Ende erzeugt ([B, H, V, 1]).
-        # q_bcast hat aber die Form [B, H, V]. Dies führt zum Crash bei der Subtraktion.
-        # Die Lösung: Wir entfernen diese letzte Dimension explizit mit .squeeze(-1).
-        # ##################################################################################
-        if not is_vector_input:
-             prob_in_bin = prob_in_bin.squeeze(-1)
-             cdf_start_of_bin = cdf_start_of_bin.squeeze(-1)
-             lower_edge = lower_edge.squeeze(-1)
+            # ##################################################################################
+            # ## KORREKTURBLOCK: DIMENSIONS-MISMATCH ##
+            # Im __init__-Pfad (wenn is_vector_input=False) hatten die gather-Operationen
+            # eine überflüssige Dimension am Ende erzeugt ([B, H, V, 1]).
+            # q_bcast hat aber die Form [B, H, V]. Dies führt zum Crash bei der Subtraktion.
+            # Die Lösung: Wir entfernen diese letzte Dimension explizit mit .squeeze(-1).
+            # ##################################################################################
+            if not is_vector_input:
+                 prob_in_bin = prob_in_bin.squeeze(-1)
+                 cdf_start_of_bin = cdf_start_of_bin.squeeze(-1)
+                 lower_edge = lower_edge.squeeze(-1)
 
-        # Die Subtraktion `q_bcast - cdf_start_of_bin` ist jetzt sicher.
-        numerator = q_bcast - cdf_start_of_bin
-        safe_prob_in_bin = torch.clamp(prob_in_bin, min=1e-9)
-        frac_in_bin = torch.clamp(numerator / safe_prob_in_bin, 0.0, 1.0)
-        icdf_binned = lower_edge + frac_in_bin * self._bin_width
+            # Die Subtraktion `q_bcast - cdf_start_of_bin` ist jetzt sicher.
+            numerator = q_bcast - cdf_start_of_bin
+            safe_prob_in_bin = torch.clamp(prob_in_bin, min=1e-9)
+            frac_in_bin = torch.clamp(numerator / safe_prob_in_bin, 0.0, 1.0)
+            icdf_binned = lower_edge + frac_in_bin * self._bin_width
         
         if binned_only:
             return icdf_binned
