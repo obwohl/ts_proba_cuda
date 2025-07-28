@@ -24,20 +24,10 @@ from ts_benchmark.baselines.utils import forecasting_data_provider, train_val_sp
 # 'file_system' ist robuster für langlaufende Experimente als der Standard 'file_descriptor'.
 torch.multiprocessing.set_sharing_strategy('file_system')
 
-# --- 1. Logging-Konfiguration ---
+# --- Logging-Konfiguration ---
+# Das Root-Logging wird hier konfiguriert, aber die spezifischen Handler
+# werden in der `setup_logging`-Funktion pro Prozess eingerichtet.
 logging.getLogger("optuna").setLevel(logging.INFO)
-# --- WICHTIG: Ändere den Namen, um die Ergebnisse dieses Experiments zu isolieren ---
-STUDY_NAME = "eisbach_airtemp_pressure_focus_auf_wassertemp" 
-STORAGE_NAME = "sqlite:///optuna_study.db"
-
-# --- NEU: Konfiguration für den automatisierten Warm-Start ---
-# Setze auf den Namen der alten Studie, von der die besten Trials übernommen werden sollen.
-# Auf `None` setzen, um diese Funktion zu deaktivieren.
-WARM_START_FROM_OLD_STUDY = None 
-# Wie viele der besten Trials aus der alten Studie sollen übernommen werden?
-NUM_WARM_START_TRIALS_FROM_STUDY = 5
-# Schalter für den alten JSON-basierten Warm-Start. Wird ignoriert, wenn WARM_START_FROM_OLD_STUDY gesetzt ist.
-USE_WARM_START_FROM_JSON = True 
 
 # --- 2. Feste Trainingsparameter für die lange, intensive Suche ---
 FIXED_PARAMS = {
@@ -306,6 +296,16 @@ def setup_logging(study_name: str):
     print(f"Logging for PID {pid} is set up to write to {log_file_path}")
     
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run an Optuna worker for a study.")
+    parser.add_argument("--study-name", required=True, type=str, help="The name of the Optuna study.")
+    parser.add_argument("--storage-name", required=True, type=str, help="The storage URL for the Optuna study.")
+    args = parser.parse_args()
+
+    STUDY_NAME = args.study_name
+    STORAGE_NAME = args.storage_name
+
     study = optuna.create_study(
         study_name=STUDY_NAME,
         storage=STORAGE_NAME,
@@ -317,6 +317,10 @@ if __name__ == "__main__":
             reduction_factor=3,
         )
     )
+
+    # Die Sicherheitsprüfung gegen Race Conditions wurde entfernt, da das neue
+    # Start-Skript `run_study.py` dieses Problem nun robust an der Quelle löst,
+    # indem es die Warteschlange vor dem Start der Worker füllt.
 
     # --- NEU: Logging für diesen Worker-Prozess einrichten ---
     setup_logging(STUDY_NAME)
