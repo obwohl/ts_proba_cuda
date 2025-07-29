@@ -23,7 +23,7 @@ import signal
 # Alles, was Sie anpassen müssen, ist hier an einem Ort.
 
 # -- Studien-Konfiguration --
-STUDY_NAME = "eisbach_96_temp_pressure_4"
+STUDY_NAME = "eisbach_96_temp_pressure_jetzt_aber"
 STORAGE_NAME = "sqlite:///optuna_study.db"  # Fester DB-Name. Studien werden intern durch STUDY_NAME unterschieden.
 
 # -- Parallelisierungs-Konfiguration --

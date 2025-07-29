@@ -25,3 +25,4 @@ metadata.json
 *study.db
 results/
 inference_checkpoints/
+*.png
