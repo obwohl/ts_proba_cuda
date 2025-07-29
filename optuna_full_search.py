@@ -29,26 +29,24 @@ logging.getLogger("optuna").setLevel(logging.INFO)
 
 # --- 2. Feste Trainingsparameter für die lange, intensive Suche ---
 FIXED_PARAMS = {
-    "data_file": "combo_new.csv", 
+    "data_file": "eisbach_airtemp96_pressure96.csv", 
     "horizon": 96,
     "train_ratio_in_tv": 0.8, # NEU: Split-Verhältnis explizit gemacht
     # --- NEU: Wähle die zu optimierende Metrik ---
     # 'cvar': Conditional Value at Risk (Durchschnitt der schlechtesten 5% Fehler) -> robustere Modelle
     # 'avg_crps': Durchschnittlicher CRPS-Fehler über alle Fenster -> beste Durchschnitts-Performance
     "optimization_metric": "cvar",
-    # --- NEU: Gezielte Optimierung auf einen einzelnen Kanal ---
     # Setze hier einen Kanalnamen (z.B. "wassertemp"), um den Validierungs-Loss nur für diesen Kanal zu berechnen.
     # Setze auf `None`, um den Durchschnitt über alle Kanäle zu verwenden (Standardverhalten).
     "optimization_target_channel": "wassertemp",
-    "num_epochs": 50,
-    "patience": 5,    
-    # NEU: num_workers wird über Umgebungsvariable gesteuert, um Parallelisierung zu erleichtern.
-    # Standardwert ist 8, wenn die Variable nicht gesetzt ist.
+    "num_epochs": 100,
+    "patience": 5,
+    "early_stopping_delta": 1e-4,
+
     "num_workers": int(os.getenv("TRIAL_WORKERS", "4")),
     "quantiles": [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99], # <-- HIER ERWEITERN
-    "lradj": "constant", # Angepasst für bessere Performance
-    # --- NEU: Konfiguration für epochenbasiertes Pruning ---
-    # Die minimale Anzahl an Epochen, bevor ein Trial abgebrochen werden kann.
+    "lradj": "cosine_warmup", # Um Cosine Annealing zu verwenden
+    "warmup_epochs": 0,
     "min_epochs_for_pruning": 3,
     # PyTorch Profiler ist deaktiviert. Setze eine Epochennummer (z.B. 1), um ihn zu aktivieren.
     # NEU: Hartes Speicherlimit in Gigabyte für MPS-Geräte. Auf `None` setzen, um zu deaktivieren.
@@ -56,20 +54,20 @@ FIXED_PARAMS = {
     "max_memory_gb": None,
     "profile_epoch": None,
     # NEU: Schalter zum Deaktivieren der speicherintensiven Plots während der Optuna-Suche.
-    "enable_diagnostic_plots": False,
-    # "channel_adjacency_prior": [
+    "enable_diagnostic_plots": True,
+    # "channel_adjacency_prior": [ isarpegel
     #     [1, 1, 0, 0, 0, 0],  
     #     [1, 1, 0, 0, 0, 0],
     #     [1, 1, 1, 1, 0, 0],
     #     [1, 1, 1, 1, 0, 0],
     #     [1, 1, 1, 1, 1, 1],
-    #     [1, 1, 1, 1, 1, 1], 
-    # ] für isarpegel
-    # "channel_adjacency_prior": [
-    #     [1, 1, 1],  #wassertemp
-    #     [0, 1, 1], #airtemp96
-    #     [0, 0, 1], #pressure96
-    # ]
+    #     [1, 1, 1, 1, 1, 1], ]
+
+    "channel_adjacency_prior": [
+        [1, 1, 1],  #wasser
+        [0, 1, 1], #air
+        [0, 0, 1], #pressure
+    ]
 }
 
 def get_suggested_params(trial: optuna.Trial) -> dict:
@@ -77,14 +75,14 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params = {}
     params["seq_len"] = trial.suggest_categorical("seq_len", [48, 96, 192, 384])
     params["norm_mode"] = trial.suggest_categorical("norm_mode", ["subtract_last", "subtract_median"])
-    params["lr"] = trial.suggest_float("lr", 1e-7, 1e-2, log=True)
+    params["lr"] = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
     params["d_model"] = trial.suggest_categorical("d_model", [32, 64, 128, 256, 512])
     params["d_ff"] = trial.suggest_categorical("d_ff", [32, 64, 128, 256, 512])
     params["e_layers"] = trial.suggest_int("e_layers", 1, 3)
 
     # --- NEU: moving_avg als kategorialer Hyperparameter ---
     # Gib hier sinnvolle Werte basierend auf der bekannten Periodizität deiner Daten an.
-    params["moving_avg"] = trial.suggest_categorical("moving_avg", [5,49, 97, 193]) # für wasserpegel schwierig zu raten, stündlich, halbtäglich, täglich, oder zweitäglich? soll optuna rausfinden.
+    params["moving_avg"] = trial.suggest_categorical("moving_avg", [5, 25, 49, 97, 193]) # für wasserpegel schwierig zu raten, stündlich, halbtäglich, täglich, oder zweitäglich? soll optuna rausfinden.
 
     # --- KORREKTUR: Statischer Suchraum für n_heads ---
     # 1. Schlage n_heads immer aus der vollen Liste vor, um den Suchraum statisch zu halten.
@@ -331,7 +329,10 @@ if __name__ == "__main__":
     data = data_source._load_series(FIXED_PARAMS['data_file'])
     print("Data loaded successfully. Starting optimization...")
 
-    study.optimize(lambda trial: objective(trial, data), n_trials=100)
+    # Führe die Optimierung ohne festes n_trials aus.
+    # Der Worker läuft so lange, bis er extern beendet wird (z.B. durch Strg+C im run_study.py Skript).
+    # Dies ist die Standardmethode für parallele Studien, bei denen die Gesamtzahl der Trials nicht pro Worker festgelegt wird.
+    study.optimize(lambda trial: objective(trial, data), n_trials=None)
 
     print("\n\n" + "="*50 + "\nHEURISTIC SEARCH FINISHED\n" + "="*50)
     try:

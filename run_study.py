@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import uuid
+import signal
 
 # ==============================================================================
 #                 EINZIGES START-SKRIPT FÜR OPTUNA-STUDIEN
@@ -22,12 +23,12 @@ import uuid
 # Alles, was Sie anpassen müssen, ist hier an einem Ort.
 
 # -- Studien-Konfiguration --
-STUDY_NAME = "eisbach_grand_6"
+STUDY_NAME = "eisbach_96_temp_pressure_4"
 STORAGE_NAME = "sqlite:///optuna_study.db"  # Fester DB-Name. Studien werden intern durch STUDY_NAME unterschieden.
 
 # -- Parallelisierungs-Konfiguration --
 # Wie viele parallele Python-Prozesse (Trials) sollen gestartet werden?
-NUM_PARALLEL_TRIALS = 2
+NUM_PARALLEL_TRIALS = 3
 # Wie viele CPU-Worker soll JEDER Trial für den DataLoader verwenden?
 WORKERS_PER_TRIAL = 8
 # NEU: Eine Verzögerung zwischen dem Start der Worker, um DB-Race-Conditions zu entschärfen.
@@ -152,7 +153,8 @@ def run_workers(study_name, storage_name, num_trials, workers_per_trial):
                 "--study-name", study_name,
                 "--storage-name", storage_name
             ],
-            env=env
+            env=env,
+            preexec_fn=os.setsid # WICHTIG: Startet den Worker in einer neuen Prozessgruppe
         )
         processes.append(process)
 
@@ -174,7 +176,12 @@ def run_workers(study_name, storage_name, num_trials, workers_per_trial):
     except KeyboardInterrupt:
         print("\nStrg+C erkannt. Terminiere alle Worker-Prozesse...")
         for p in processes:
-            p.terminate()
+            try:
+                # Sende SIGTERM an die gesamte Prozessgruppe, um auch Kindprozesse (DataLoader) zu beenden.
+                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+            except ProcessLookupError:
+                # Der Prozess ist möglicherweise bereits beendet.
+                pass
         print("Alle Worker-Prozesse wurden beendet.")
 
 if __name__ == "__main__":

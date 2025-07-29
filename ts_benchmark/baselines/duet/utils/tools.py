@@ -27,12 +27,26 @@ def adjust_learning_rate(optimizer, epoch, args, verbose=True):
     elif args.lradj == 'cosine_warmup':
         warmup_epochs = getattr(args, 'warmup_epochs', 10)
         if epoch <= warmup_epochs:
-            # linear warmup
-            lr = args.lr * (epoch / warmup_epochs)
+            # Linearer Warmup
+            # Verhindert Division durch Null, wenn warmup_epochs=0 ist.
+            if warmup_epochs > 0:
+                lr = args.lr * (epoch / warmup_epochs)
+            else:
+                # Wenn kein Warmup, sollte dieser Zweig für Epoche >= 1 nicht erreicht werden.
+                # Zur Sicherheit wird die LR auf den Startwert gesetzt.
+                lr = args.lr
         else:
-            # cosine annealing
-            progress = (epoch - warmup_epochs) / (args.num_epochs - warmup_epochs)
-            lr = 0.5 * args.lr * (1. + math.cos(math.pi * progress))
+            # Cosine Annealing
+            decay_epochs = args.num_epochs - warmup_epochs
+            # Stelle sicher, dass wir eine Decay-Phase haben
+            if decay_epochs > 0:
+                # Korrekte Berechnung des Fortschritts (von 0 bis 1) innerhalb der Decay-Phase
+                current_decay_epoch = epoch - warmup_epochs
+                progress = (current_decay_epoch - 1) / (decay_epochs - 1) if decay_epochs > 1 else 1.0
+                lr = 0.5 * args.lr * (1. + math.cos(math.pi * progress))
+            else:
+                # Wenn keine Decay-Phase nach dem Warmup übrig ist, halte die LR konstant.
+                lr = args.lr
         lr_adjust = {epoch: lr}
     elif args.lradj == 'plateau':
         return
@@ -49,6 +63,16 @@ def adjust_learning_rate(optimizer, epoch, args, verbose=True):
 
 class EarlyStopping:
     def __init__(self, patience=7, verbose=False, delta=0):
+        """
+        Args:
+            patience (int): How long to wait after last time validation loss improved.
+                            Default: 7
+            verbose (bool): If True, prints a message for each validation loss improvement. 
+                            Default: False
+            delta (float):  Minimum change in the monitored quantity to qualify as an improvement.
+                            Eine Verbesserung wird nur gezählt, wenn `neuer_loss <= alter_loss - delta`.
+                            Default: 0
+        """
         self.patience = patience
         self.verbose = verbose
         self.counter = 0
@@ -77,6 +101,11 @@ class EarlyStopping:
         if self.best_score is None:
             self.best_score = score
             self.save_checkpoint(val_loss, model_state)
+        # Die Logik hier ist `score <= self.best_score + self.delta`.
+        # Da score = -loss, ist das äquivalent zu `-val_loss <= -self.val_loss_min + self.delta`,
+        # was umgestellt `self.val_loss_min - val_loss <= self.delta` bedeutet.
+        # Das heißt, wenn die Verbesserung (val_loss_min - val_loss) kleiner oder gleich delta ist,
+        # wird es als KEINE Verbesserung gezählt und der Counter erhöht.
         elif score <= self.best_score + self.delta:
             self.counter += 1
             if self.verbose:

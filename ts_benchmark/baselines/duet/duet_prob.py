@@ -474,7 +474,11 @@ class DUETProb(ModelBase):
         if config.lradj == "plateau" and valid_data_loader is not None:
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=config.patience // 2, factor=0.5)
 
-        self.early_stopping = EarlyStopping(patience=config.patience, verbose=True)
+        self.early_stopping = EarlyStopping(
+            patience=config.patience,
+            verbose=True,
+            delta=getattr(config, 'early_stopping_delta', 0) # HIER WIRD DER DELTA-WERT ÜBERGEBEN
+        )
 
         # --- NEU: Zeitmessung für Optuna ---
         start_time = time.time()
@@ -947,7 +951,7 @@ class DUETProb(ModelBase):
 
                 if config.lradj != "plateau":
                     # Silencing the learning rate update to reduce terminal clutter
-                    adjust_learning_rate(optimizer, epoch + 1, config, verbose=False)
+                    adjust_learning_rate(optimizer, epoch + 1, config, verbose=True)
                 
                 # === END-OF-EPOCH OPTUNA REPORTING (REMOVED) ===
                 # The trial.report() call at the end of the epoch is now redundant.
