@@ -964,6 +964,8 @@ class DUETProb(ModelBase):
                         break # Beendet die Epochen-Schleife
                 
                 writer.add_scalar("Misc/Learning_Rate", optimizer.param_groups[0]['lr'], epoch)
+                # NEUER FIX: Erzwinge das Schreiben der TensorBoard-Logs auf die Festplatte am Ende jeder Epoche.
+                writer.flush()
 
         finally:
             # Lade den besten Zustand vom EarlyStopping und speichere ihn

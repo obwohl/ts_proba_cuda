@@ -101,8 +101,10 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params["loss_coef"] = trial.suggest_float("loss_coef", 0.1, 2.0, log=True)
     
     # --- NEU: Loss-Funktion als Hyperparameter ---
-    params["loss_function"] = trial.suggest_categorical("loss_function", ["gfl", "crps"])
-    if params["loss_function"] == 'gfl':
+    # Die Analyse hat gezeigt, dass 'gfl' durchweg zu sinnvollerem Modellverhalten führt.
+    # Wir entfernen 'crps' aus dem Suchraum, um "faule" Modelle zu vermeiden. Diese produzieren nur zickzackmüll
+    params["loss_function"] = "gfl" 
+    if params["loss_function"] == 'gfl': # Diese Bedingung ist jetzt immer wahr, aber schadet nicht.
         params["gfl_gamma"] = trial.suggest_float("gfl_gamma", 0.5, 5.0)
 
     params["use_agc"] = trial.suggest_categorical("use_agc", [True, False])
@@ -110,9 +112,9 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
         params["agc_lambda"] = trial.suggest_float("agc_lambda", 0.001, 0.1, log=True)
 
     # --- NEU: Hybride Experten-Konfiguration ---
-    params["num_linear_experts"] = trial.suggest_int("num_linear_experts", 0, 8)
-    params["num_univariate_esn_experts"] = trial.suggest_int("num_univariate_esn_experts", 0, 8)
-    params["num_multivariate_esn_experts"] = trial.suggest_int("num_multivariate_esn_experts", 0, 8)
+    params["num_linear_experts"] = trial.suggest_int("num_linear_experts", 1, 8)
+    params["num_univariate_esn_experts"] = trial.suggest_int("num_univariate_esn_experts", 1, 8)
+    params["num_multivariate_esn_experts"] = trial.suggest_int("num_multivariate_esn_experts", 1, 4)
     
     # Stelle sicher, dass mindestens ein Experte vorhanden ist.
     total_experts = (
@@ -134,7 +136,6 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
         params["sparsity_uni"] = trial.suggest_float("sparsity_uni", 0.01, 0.5)
         params["leak_rate_uni"] = trial.suggest_float("leak_rate_uni", 0.1, 1.0)
         params["input_scaling_uni"] = trial.suggest_float("input_scaling_uni", 0.1, 2.0, log=True)
-        # NEU: Weight Decay (L2-Regularisierung) für die univariaten ESN-Readout-Schichten
         params["esn_uni_weight_decay"] = trial.suggest_float("esn_uni_weight_decay", 1e-6, 1e-1, log=True)
 
     # Schlage multivariaten ESN-Parameter vor, wenn diese Experten verwendet werden.
@@ -147,7 +148,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
         # NEU: Weight Decay (L2-Regularisierung) für die multivariaten ESN-Readout-Schichten
         params["esn_multi_weight_decay"] = trial.suggest_float("esn_multi_weight_decay", 1e-6, 1e-1, log=True)
 
-    params["projection_head_layers"] = trial.suggest_int("projection_head_layers", 0, 4)
+    params["projection_head_layers"] = trial.suggest_int("projection_head_layers", 2, 4)
     if params["projection_head_layers"] > 0:
         params["projection_head_dim_factor"] = trial.suggest_categorical("projection_head_dim_factor", [1, 2, 4, 8])
         params["projection_head_dropout"] = trial.suggest_float("projection_head_dropout", 0.0, 0.5)
@@ -155,7 +156,9 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params["loss_target_clip"] = trial.suggest_categorical("loss_target_clip", [None, 5.0, 10.0, 15.0])
 
     # --- NEU: Jerk-Penalty für glatte Xi-Trajektorien ---
-    params["jerk_loss_coef"] = trial.suggest_float("jerk_loss_coef", 1e-5, 1.0, log=True)
+    # VORERST DEAKTIVIERT, da es das Modell zu "faulen" Vorhersagen zwingt.
+    # params["jerk_loss_coef"] = trial.suggest_float("jerk_loss_coef", 1e-5, 1.0, log=True)
+    params["jerk_loss_coef"] = 0.0
 
     # --- NEU: Channel Adjacency Prior an/ausschalten ---
     params["use_channel_adjacency_prior"] = trial.suggest_categorical("use_channel_adjacency_prior", [True, False])
