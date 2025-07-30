@@ -5,8 +5,6 @@
 --extra-index-url https://download.pytorch.org/whl/nightly/cu129
 --pre
 torch
-torchvision
-torchaudio
 numpy
 pandas
 scikit-learn
@@ -17,6 +15,7 @@ einops # For tensor manipulation in models
 # --- Hyperparameter-Optimierung & Ausführung ---
 optuna
 
+
 # --- Performance & Utilities ---
 tqdm # Fortschrittsbalken
 Pillow # Für Bildverarbeitung (PIL)
@@ -25,5 +24,9 @@ Pillow # Für Bildverarbeitung (PIL)
 matplotlib
 tensorboard # Für das Logging mit SummaryWriter
 
+
 # --- Analyse-Skripte ---
 scikit-posthocs # For statistical tests in analyze_hardest_windows.py
+tqdm # Progress bars
+astropy # For Lomb-Scargle periodogram in find_lombscargle_periods.py
+
