@@ -8,6 +8,22 @@ from torch.distributions import Distribution, constraints
 from torch.distributions.utils import broadcast_all
 
 @torch.jit.script
+def _log1p_div_x(x: torch.Tensor) -> torch.Tensor:
+    """
+    Numerically stable implementation of log(1+x)/x.
+    Uses the Taylor expansion log(1+x)/x ≈ 1 - x/2 for x close to 0.
+    This is crucial for the GPD log-likelihood calculation to avoid
+    the exploding term 1/xi when xi is close to zero.
+    """
+    is_small = torch.abs(x) < 1e-6
+    # Avoid division by zero for the direct computation path
+    safe_x = torch.where(is_small, torch.ones_like(x), x)
+    
+    taylor_approx = 1.0 - x / 2.0
+    return torch.where(is_small, taylor_approx, torch.log1p(x) / safe_x)
+
+
+@torch.jit.script
 def _compiled_icdf_vector_loop(
     quantiles: torch.Tensor,
     bin_cdfs: torch.Tensor,
@@ -70,11 +86,66 @@ class SplicedBinnedPareto(Distribution):
         self._bin_width = (bins_upper_bound - bins_lower_bound) / self.num_bins
         self.bin_edges = torch.linspace(
             bins_lower_bound, bins_upper_bound, self.num_bins + 1, device=logits.device)
-        
-        # Diese Aufrufe verursachen den Fehler, wenn die icdf-Methode nicht korrekt ist.
-        self.lower_threshold = self.icdf(torch.full_like(self.lower_gp_xi, self.tail_percentile), binned_only=True)
-        self.upper_threshold = self.icdf(torch.full_like(self.upper_gp_xi, 1.0 - self.tail_percentile), binned_only=True)
 
+        # === KRITISCHER FIX: SCHLIESSE DIE THRESHOLD-LÜCKE ===
+        # Das vorherige Verhalten hat die Schwellen dynamisch berechnet. Das Modell hat
+        # gelernt, die Bins so breit zu machen, dass die Schwellen nach außen wandern
+        # und keine Datenpunkte mehr als "im Tail" klassifiziert werden.
+        # Die Lösung: Die Schwellen sind jetzt die festen, nicht-lernbaren Grenzen
+        # des Binned-Bereichs. Das Modell kann diese nicht mehr manipulieren.
+        self.lower_threshold = torch.full_like(self.lower_gp_xi, self.bins_lower_bound)
+        self.upper_threshold = torch.full_like(self.upper_gp_xi, self.bins_upper_bound)
+
+    def cdf(self, value: torch.Tensor) -> torch.Tensor:
+        """
+        Berechnet die kumulative Verteilungsfunktion (CDF), P(X <= value).
+        """
+        value = value.expand(self.batch_shape)
+
+        # --- 1. CDF für den unteren Tail (value < lower_threshold) ---
+        y = self.lower_threshold - value
+        is_near_zero_lower = torch.abs(self.lower_gp_xi) < 1e-6
+        # GPD-Fall
+        log1p_arg_lower = self.lower_gp_xi * y / self.lower_gp_beta
+        safe_log1p_arg_lower = torch.clamp(log1p_arg_lower, min=-(1.0 - 1e-6))
+        surv_gpd_lower = torch.pow(1.0 + safe_log1p_arg_lower, -1.0 / self.lower_gp_xi)
+        # Exponential-Fall (Grenzwert für xi=0)
+        surv_exp_lower = torch.exp(-y / self.lower_gp_beta)
+        # Kombinieren
+        surv_lower = torch.where(is_near_zero_lower, surv_exp_lower, surv_gpd_lower)
+        cdf_lower = self.tail_percentile * (1.0 - surv_lower)
+
+        # --- 2. CDF für den oberen Tail (value > upper_threshold) ---
+        z = value - self.upper_threshold
+        is_near_zero_upper = torch.abs(self.upper_gp_xi) < 1e-6
+        # GPD-Fall
+        log1p_arg_upper = self.upper_gp_xi * z / self.upper_gp_beta
+        safe_log1p_arg_upper = torch.clamp(log1p_arg_upper, min=-(1.0 - 1e-6))
+        surv_gpd_upper = torch.pow(1.0 + safe_log1p_arg_upper, -1.0 / self.upper_gp_xi)
+        # Exponential-Fall
+        surv_exp_upper = torch.exp(-z / self.upper_gp_beta)
+        # Kombinieren
+        surv_upper = torch.where(is_near_zero_upper, surv_exp_upper, surv_gpd_upper)
+        cdf_upper = (1.0 - self.tail_percentile) + self.tail_percentile * (1.0 - surv_upper)
+
+        # --- 3. CDF für den gebinnten Bereich ---
+        body_mass = 1.0 - 2.0 * self.tail_percentile
+        bin_probs = torch.softmax(self.logits, dim=-1) * body_mass
+        bin_cdfs_unscaled = torch.cumsum(bin_probs, dim=-1)
+        cdf_start_of_bins = F.pad(bin_cdfs_unscaled, (1, 0), 'constant', 0.0)[..., :-1]
+        bin_indices = torch.clamp(torch.floor((value - self.bins_lower_bound) / self._bin_width), 0, self.num_bins - 1).long()
+        prob_of_bins_below = torch.gather(cdf_start_of_bins, -1, bin_indices.unsqueeze(-1)).squeeze(-1)
+        prob_in_current_bin = torch.gather(bin_probs, -1, bin_indices.unsqueeze(-1)).squeeze(-1)
+        fraction_in_current_bin = torch.clamp((value - self.bin_edges[bin_indices]) / self._bin_width, 0.0, 1.0)
+        cdf_binned = self.tail_percentile + prob_of_bins_below + fraction_in_current_bin * prob_in_current_bin
+
+        # --- 4. Kombiniere die drei Bereiche ---
+        in_lower_tail = value < self.lower_threshold
+        in_upper_tail = value > self.upper_threshold
+        cdf_val = torch.where(in_lower_tail, cdf_lower, cdf_binned)
+        cdf_val = torch.where(in_upper_tail, cdf_upper, cdf_val)
+        
+        return torch.clamp(cdf_val, 0.0, 1.0)
 
     def icdf(self, quantiles: torch.Tensor, binned_only: bool = False) -> torch.Tensor:
         bin_probs = torch.softmax(self.logits, dim=-1)
@@ -168,7 +239,6 @@ class SplicedBinnedPareto(Distribution):
         finfo = torch.finfo(value.dtype)
         return torch.nan_to_num(value, nan=0.0, posinf=finfo.max, neginf=finfo.min)
     
-    @property
     def mean(self) -> torch.Tensor:
         # Eine vernünftige Anzahl von Quantilen für eine stabile Mean-Approximation
         q = torch.linspace(0.005, 0.995, 199, device=self.logits.device)
@@ -179,25 +249,43 @@ class SplicedBinnedPareto(Distribution):
         value = value.expand(self.batch_shape)
         
         # Binned Log Prob
+        # === DEFINITIVE FIX: The binned probability must be scaled by the body mass ===
+        # The log_prob was previously using a raw softmax, implying the binned region had
+        # a total probability of 1.0, which is incorrect. This created a mathematically
+        # inconsistent distribution and was the final root cause of the learning failure.
+        body_mass = 1.0 - 2.0 * self.tail_percentile
         bin_indices = torch.clamp(torch.floor((value - self.bins_lower_bound) / self._bin_width), 0, self.num_bins - 1).long()
-        bin_probs = torch.softmax(self.logits, dim=-1)
+        bin_probs = torch.softmax(self.logits, dim=-1) * body_mass
         prob_in_bin = torch.gather(bin_probs, -1, bin_indices.unsqueeze(-1)).squeeze(-1)
         log_prob_binned = torch.log(prob_in_bin / self._bin_width + 1e-9)
 
         # Tail Log Prob
         y = self.lower_threshold - value
         log1p_arg_lower = self.lower_gp_xi * y / self.lower_gp_beta
-        is_near_zero_lower = torch.abs(self.lower_gp_xi) < 1e-6
-        log_pdf_gpd_lower = -torch.log(self.lower_gp_beta) - (1.0 + 1.0 / self.lower_gp_xi) * torch.log1p(torch.clamp(log1p_arg_lower, max=1.0 - 1e-6))
-        log_pdf_exp_lower = -torch.log(self.lower_gp_beta) - y / self.lower_gp_beta
-        log_prob_lower = torch.where(is_near_zero_lower, log_pdf_exp_lower, log_pdf_gpd_lower)
+        # --- FIX: Clamp the argument to log1p to prevent NaNs, which kill gradients. ---
+        # log1p(x) is only defined for x > -1. We clamp it to be safe.
+        safe_log1p_arg_lower = torch.clamp(log1p_arg_lower, min=-(1.0 - 1e-6))
+        
+        # === FINAL FIX: Add the missing log-probability scaling for the tail mass ===
+        # The log-probability must be scaled by the probability mass in the tail.
+        log_tail_mass = torch.log(torch.tensor(self.tail_percentile, device=value.device))
+        
+        # --- Lower Tail ---
+        y = self.lower_threshold - value
+        log1p_arg_lower = self.lower_gp_xi * y / self.lower_gp_beta
+        safe_log1p_arg_lower = torch.clamp(log1p_arg_lower, min=-(1.0 - 1e-6))
+        # The numerically stable GPD log-pdf calculation. This formula now correctly
+        # converges to the exponential PDF as xi -> 0, so the `torch.where` switch
+        # is no longer needed and was the source of the zero-gradient trap.
+        log_pdf_gpd_lower = -torch.log(self.lower_gp_beta) - torch.log1p(safe_log1p_arg_lower) - (y / self.lower_gp_beta) * _log1p_div_x(safe_log1p_arg_lower)
+        log_prob_lower = log_tail_mass + log_pdf_gpd_lower
 
+        # --- Upper Tail ---
         z = value - self.upper_threshold
         log1p_arg_upper = self.upper_gp_xi * z / self.upper_gp_beta
-        is_near_zero_upper = torch.abs(self.upper_gp_xi) < 1e-6
-        log_pdf_gpd_upper = -torch.log(self.upper_gp_beta) - (1.0 + 1.0 / self.upper_gp_xi) * torch.log1p(torch.clamp(log1p_arg_upper, max=1.0 - 1e-6))
-        log_pdf_exp_upper = -torch.log(self.upper_gp_beta) - z / self.upper_gp_beta
-        log_prob_upper = torch.where(is_near_zero_upper, log_pdf_exp_upper, log_pdf_gpd_upper)
+        safe_log1p_arg_upper = torch.clamp(log1p_arg_upper, min=-(1.0 - 1e-6))
+        log_pdf_gpd_upper = -torch.log(self.upper_gp_beta) - torch.log1p(safe_log1p_arg_upper) - (z / self.upper_gp_beta) * _log1p_div_x(safe_log1p_arg_upper)
+        log_prob_upper = log_tail_mass + log_pdf_gpd_upper
 
         in_lower_tail = value < self.lower_threshold
         in_upper_tail = value > self.upper_threshold
@@ -274,14 +362,17 @@ class SplicedBinnedParetoOutput:
         (lower_gp_xi_raw, lower_gp_beta_raw, 
          upper_gp_xi_raw, upper_gp_beta_raw) = [distr_args[..., i] for i in range(self.num_bins, self.num_bins + 4)]
         
+        # Die Logits werden leicht gedämpft, um extreme Wahrscheinlichkeiten zu vermeiden.
         logits = 10.0 * torch.tanh(logits_raw / 10.0)
+        
+        # Die Beta-Parameter (Skalierung der Tails) müssen positiv sein. Softplus stellt dies sicher.
         BETA_FLOOR = 0.01
-        XI_SCALE = 0.5
         lower_gp_beta = F.softplus(lower_gp_beta_raw) + BETA_FLOOR
         upper_gp_beta = F.softplus(upper_gp_beta_raw) + BETA_FLOOR
-        lower_gp_xi = torch.tanh(lower_gp_xi_raw) * XI_SCALE
-        upper_gp_xi = torch.tanh(upper_gp_xi_raw) * XI_SCALE
 
+        lower_gp_xi = lower_gp_xi_raw
+        upper_gp_xi = upper_gp_xi_raw
+        
         return SplicedBinnedPareto(
             logits=logits, lower_gp_xi=lower_gp_xi, lower_gp_beta=lower_gp_beta,
             upper_gp_xi=upper_gp_xi, upper_gp_beta=upper_gp_beta,

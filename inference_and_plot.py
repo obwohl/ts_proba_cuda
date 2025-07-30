@@ -85,8 +85,8 @@ def main():
         input_tensor = torch.tensor(input_df.values, dtype=torch.float32).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            # Das Modell gibt jetzt 6 Werte zurück (final_distr, base_distr, L_importance, gate_weights_linear, gate_weights_esn, selection_counts)
-            distr, _, _, _, _, _ = model(input_tensor)
+            # Das Modell gibt jetzt 9 Werte zurück. Wir brauchen nur den ersten (final_distr).
+            distr, _, _, _, _, _, _, _, _ = model(input_tensor)
             
             quantile_forecasts = [distr.icdf(torch.tensor(q, device=device, dtype=torch.float32)) for q in QUANTILES_TO_PLOT]
             output_tensor = torch.stack(quantile_forecasts, dim=0)

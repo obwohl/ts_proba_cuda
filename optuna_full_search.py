@@ -155,10 +155,9 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
 
     params["loss_target_clip"] = trial.suggest_categorical("loss_target_clip", [None, 5.0, 10.0, 15.0])
 
-    # --- NEU: Jerk-Penalty für glatte Xi-Trajektorien ---
-    # VORERST DEAKTIVIERT, da es das Modell zu "faulen" Vorhersagen zwingt.
-    # params["jerk_loss_coef"] = trial.suggest_float("jerk_loss_coef", 1e-5, 1.0, log=True)
-    params["jerk_loss_coef"] = 0.0
+    # --- NEU: Hybrider Loss GFL + NLL ---
+    # Koeffizient für den NLL-Anteil am Gesamtverlust.
+    params["nll_loss_coef"] = trial.suggest_float("nll_loss_coef", 1e-4, 0.5, log=True)
 
     # --- NEU: Channel Adjacency Prior an/ausschalten ---
     params["use_channel_adjacency_prior"] = trial.suggest_categorical("use_channel_adjacency_prior", [True, False])

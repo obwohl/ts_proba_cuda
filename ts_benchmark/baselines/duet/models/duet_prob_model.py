@@ -124,28 +124,89 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
         )
         
         # --- DEFINITIVE FIX: Use Per-Channel Projection Heads ---
-        # The previous shared projection head was re-mixing channel information after
-        # the Channel_transformer had carefully separated it. This created a difficult
-        # optimization problem where the MLP had to learn two different functions
-        # (one simple, one complex) with a single set of weights, leading to
-        # conflicting gradients. By creating a dedicated head for each channel,
-        # we ensure that the final distribution parameters for a channel are derived
-        # ONLY from its own (masked) feature representation.
+        # --- ARCHITEKTONISCHE ENTKOPPLUNG: Getrennte Köpfe für Logits und Tails ---
+        # Anstatt eines einzigen Kopfes, der alle Parameter ausgibt, schaffen wir zwei
+        # spezialisierte Köpfe. Dies entkoppelt die Optimierung des Verteilungsrumpfes
+        # (via GFL auf den Logits) von der (noch zu definierenden) Optimierung der Ränder.
+        # === DEFINITIVE FIX: Create four independent heads for the four tail parameters ===
+        # This prevents "gradient crosstalk" where the learning signal for one parameter
+        # destructively interferes with the weights for another.
         self.channel_names = list(config.channel_bounds.keys())
-        self.args_proj = nn.ModuleDict()
+        self.logits_proj = nn.ModuleDict()
+        self.lower_xi_proj = nn.ModuleDict()
+        self.lower_beta_proj = nn.ModuleDict()
+        self.upper_xi_proj = nn.ModuleDict()
+        self.upper_beta_proj = nn.ModuleDict()
+
         in_features_per_channel = self.d_model
-        out_features_per_channel = self.horizon * self.distr_output_helper.args_dim
+
+        # Dimensionen für den Logits-Kopf (nur die Bins)
+        logits_out_features = self.horizon * self.distr_output_helper.num_bins
+        
+        # Jeder der vier Tail-Köpfe gibt nur einen Skalar pro Zeitschritt aus.
+        # Die Ausgabe-Dimension ist also einfach die Länge des Horizonts.
+        param_out_features = self.horizon
+
         hidden_dim_factor = getattr(config, 'projection_head_dim_factor', 2)
         hidden_dim = max(self.distr_output_helper.args_dim, in_features_per_channel // hidden_dim_factor)
 
         for name in self.channel_names:
-            self.args_proj[name] = MLPProjectionHead(
+            # Ein Kopf nur für die Logits der Bins
+            self.logits_proj[name] = MLPProjectionHead(
                 in_features=in_features_per_channel,
-                out_features=out_features_per_channel,
+                out_features=logits_out_features,
                 hidden_dim=hidden_dim,
                 num_layers=getattr(config, 'projection_head_layers', 0),
                 dropout=getattr(config, 'projection_head_dropout', 0.1)
             )
+            # Erstelle vier separate, unabhängige Köpfe für die Tail-Parameter.
+            self.lower_xi_proj[name] = MLPProjectionHead(
+                in_features=in_features_per_channel,
+                out_features=param_out_features,
+                hidden_dim=hidden_dim,
+                num_layers=getattr(config, 'projection_head_layers', 0),
+                dropout=getattr(config, 'projection_head_dropout', 0.1)
+            )
+            self.lower_beta_proj[name] = MLPProjectionHead(
+                in_features=in_features_per_channel,
+                out_features=param_out_features,
+                hidden_dim=hidden_dim,
+                num_layers=getattr(config, 'projection_head_layers', 0),
+                dropout=getattr(config, 'projection_head_dropout', 0.1)
+            )
+            self.upper_xi_proj[name] = MLPProjectionHead(
+                in_features=in_features_per_channel,
+                out_features=param_out_features,
+                hidden_dim=hidden_dim,
+                num_layers=getattr(config, 'projection_head_layers', 0),
+                dropout=getattr(config, 'projection_head_dropout', 0.1)
+            )
+            self.upper_beta_proj[name] = MLPProjectionHead(
+                in_features=in_features_per_channel,
+                out_features=param_out_features,
+                hidden_dim=hidden_dim,
+                num_layers=getattr(config, 'projection_head_layers', 0),
+                dropout=getattr(config, 'projection_head_dropout', 0.1)
+            )
+
+        # === FINAL FIX: Custom Initialization for TailsHead ===
+        # The model gets stuck in a local minimum where xi=0 because the head is
+        # initialized to output zeros. We give it a "kick" by setting the initial
+        # bias of its final linear layer to a small, non-zero value. This forces
+        # the model to start with non-zero tail parameters and use the GPD loss
+        # from the very first step.
+        def init_tails_head(m):
+            if isinstance(m, nn.Linear):
+                # Initialize weights with a small normal distribution
+                nn.init.normal_(m.weight, mean=0, std=0.01)
+                # CRITICAL: Initialize the bias to a small, non-zero value.
+                nn.init.constant_(m.bias, 0.1)
+
+        for name in self.channel_names:
+            self.lower_xi_proj[name].apply(init_tails_head)
+            self.lower_beta_proj[name].apply(init_tails_head)
+            self.upper_xi_proj[name].apply(init_tails_head)
+            self.upper_beta_proj[name].apply(init_tails_head)
 
         # --- MODIFIED: Conditionally store the user-defined channel adjacency prior ---
         self.channel_adjacency_prior = None
@@ -236,29 +297,47 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
 
         # 4. Erzeugung der Verteilungsparameter
         # channel_group_feature ist [B, N_Vars, D_Model]
-        # --- DEFINITIVE FIX: Apply Per-Channel Heads ---
+        # --- NEU: Getrennte Forward-Pässe für Logits und Tails ---
         all_distr_params = []
         for i, name in enumerate(self.channel_names):
             # Get features for this channel: [B, D_Model]
             channel_feature = channel_group_feature[:, i, :]
             
-            # Pass through this channel's dedicated head
-            channel_distr_params_flat = self.args_proj[name](channel_feature)
-            
-            # Prevent NaN/inf in the parameters
-            channel_distr_params_flat = torch.nan_to_num(channel_distr_params_flat, nan=0.0, posinf=1e4, neginf=-1e4)
+            # Pass through the logits head
+            logits_flat = self.logits_proj[name](channel_feature)  # Shape: [B, H * N_Bins]
+            logits_params = rearrange(logits_flat, 'b (h d) -> b h d', h=self.horizon)
 
-            # Reshape to [B, Horizon, N_Params]
-            channel_distr_params = rearrange(
-                channel_distr_params_flat,
-                'b (h d) -> b h d',
-                h=self.horizon,
-                d=self.distr_output_helper.args_dim
+            # Pass through four separate heads. Each output has shape [B, H].
+            lower_xi_flat = self.lower_xi_proj[name](channel_feature)
+            lower_beta_flat = self.lower_beta_proj[name](channel_feature)
+            upper_xi_flat = self.upper_xi_proj[name](channel_feature)
+            upper_beta_flat = self.upper_beta_proj[name](channel_feature)
+
+            # Reshape each one and add a parameter dimension for concatenation.
+            lower_xi_params = rearrange(lower_xi_flat, 'b h -> b h 1')
+            lower_beta_params = rearrange(lower_beta_flat, 'b h -> b h 1')
+            upper_xi_params = rearrange(upper_xi_flat, 'b h -> b h 1')
+            upper_beta_params = rearrange(upper_beta_flat, 'b h -> b h 1')
+
+            # Kombiniere die Parameter in der richtigen Reihenfolge, die SplicedBinnedPareto erwartet:
+            # logits, lower_xi, lower_beta, upper_xi, upper_beta
+            channel_distr_params = torch.cat(
+                [
+                    logits_params,
+                    lower_xi_params,
+                    lower_beta_params,
+                    upper_xi_params,
+                    upper_beta_params
+                ],
+                dim=-1  # Entlang der Parameter-Dimension
             )
             all_distr_params.append(channel_distr_params)
 
         # Stack to get the final parameter tensor: [B, N_Vars, Horizon, N_Params]
         distr_params = torch.stack(all_distr_params, dim=1)
+
+        # Verhindere NaN/inf in den Parametern, bevor sie an die Verteilung gehen
+        distr_params = torch.nan_to_num(distr_params, nan=0.0, posinf=1e4, neginf=-1e4)
 
         # 5. Erstellung des finalen Verteilungsobjekts (VEKTORISIERT)
         # Anstatt über Kanäle zu loopen, übergeben wir den gesamten Parameter-Tensor

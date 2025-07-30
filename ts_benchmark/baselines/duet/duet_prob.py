@@ -137,8 +137,9 @@ class TransformerConfig:
             "projection_head_dim_factor": 2,   # Hidden dim = in_features / factor
             "projection_head_dropout": 0.1,
 
-            # --- NEW: Jerk Regularization for Xi ---
-            "jerk_loss_coef": 0.0, # Default to 0 (disabled)
+            # --- NEU: Hybrider Loss GFL + NLL ---
+            # Koeffizient für den NLL-Anteil am Gesamtverlust.
+            "nll_loss_coef": 0.0, # 0.0 deaktiviert den NLL-Anteil
 
             # --- NEW: Interim Validation ---
             "interim_validation_seconds": None, # Default: disabled. Set to e.g. 300 for 5-min validation.
@@ -340,8 +341,8 @@ class DUETProb(ModelBase):
                     input_data = input_sample_tensor.float().unsqueeze(0).to(device)
                     actuals_data = actuals_data_tensor.float().unsqueeze(0).to(device)
                     
-                    # Unpack 9 values to match the new model signature, even if most are unused here.
-                    denorm_distr, base_distr, _, _, _, _, _, _, _ = self.model(input_data)
+                    # Unpack 9 values, even if most are unused here.
+                    denorm_distr, _, _, _, _, _, _, _, _ = self.model(input_data)
 
                     # === KORREKTUR: CRPS pro Kanal berechnen, nicht den globalen Durchschnitt ===
                     # crps_loss gibt einen Tensor der Form [B, N_vars, H] zurück.
@@ -483,6 +484,7 @@ class DUETProb(ModelBase):
         # --- NEU: Zeitmessung für Optuna ---
         start_time = time.time()
         last_validation_time = start_time # Initialisiere mit der Startzeit
+        epoch_start_time = start_time # Für die Dauer pro Epoche
         # NEU: Zeitmessung für die Speicherüberwachung
         last_memory_check_time = start_time
         # NEU: Zweistufiges Intervall für die Speicherprüfung
@@ -517,12 +519,13 @@ class DUETProb(ModelBase):
 
         try:
             for epoch in range(config.num_epochs):
+                epoch_start_time = time.time() # Zeitmessung für die Epoche starten
                 self.model.train()
                 
                 # Initialisiere Listen zum Sammeln von Metriken über alle Batches einer Epoche
                 # === FIX: Speichere nur Python-Skalare (.item()), keine Tensoren, um Speicherlecks zu verhindern ===
                 epoch_total_losses, epoch_crps_losses, epoch_importance_losses, epoch_normalized_losses = [], [], [], []
-                epoch_channel_losses = {name: [] for name in getattr(config, 'channel_bounds', {}).keys()} # Denormalisiert
+                epoch_nll_losses, epoch_channel_losses = [], {name: [] for name in getattr(config, 'channel_bounds', {}).keys()} # Denormalisiert
                 epoch_normalized_channel_losses = {name: [] for name in getattr(config, 'channel_bounds', {}).keys()} # Normalisiert
 
                 # === FINALER FIX FÜR SPEICHERLECKS: Laufende Summen für Experten-Metriken ===
@@ -584,7 +587,7 @@ class DUETProb(ModelBase):
                         input_data = input_data.to(device)
                         target = target.to(device)
                         
-                        # Modell-Forward-Pass. Gibt jetzt 9 Werte zurück.
+                        # Modell-Forward-Pass.
                         denorm_distr, base_distr, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, batch_selection_counts, p_learned, p_final = self.model(input_data)
                         
                         # Zielhorizont für die Loss-Berechnung
@@ -594,85 +597,60 @@ class DUETProb(ModelBase):
                         # Der Loss für die Backpropagation wird auf der normalisierten Verteilung berechnet,
                         # um Skalenunabhängigkeit zu gewährleisten.
                         norm_target = denorm_distr.normalize_value(target_horizon).permute(0, 2, 1)
-                        
+
                         # Wende optionales Clipping auf die normalisierten Ziele an.
                         loss_clip_value = getattr(config, 'loss_target_clip', None)
                         if loss_clip_value is not None:
                             norm_target_for_loss = torch.clamp(norm_target, -loss_clip_value, loss_clip_value)
                         else:
                             norm_target_for_loss = norm_target
+                        
+                        # === TIER 1 CHANGE: COMPONENT-WISE LOSS ===
+                        # 1. Get tail thresholds and create masks for body and tail points.
+                        #    base_distr's parameters have shape [B, N_vars, H], matching norm_target_for_loss.
+                        lower_thresh = base_distr.lower_threshold
+                        upper_thresh = base_distr.upper_threshold
+                        is_in_tail = (norm_target_for_loss < lower_thresh) | (norm_target_for_loss > upper_thresh)
+                        is_in_body = ~is_in_tail
 
-                        # === NEU: Wähle die Loss-Funktion basierend auf der Konfiguration ===
+                        # 2. Calculate L_body (loss for the distribution's body)
+                        #    This uses the configured loss function (GFL or CRPS) only on non-tail points.
                         if config.loss_function == 'gfl':
-                            # --- OPTIMIERUNG: Cache für statische Tensoren ---
-                            # Dieser Code wird nur einmal zu Beginn des Trainings ausgeführt.
-                            if self._cached_gfl_bins_lower is None:
-                                tqdm.write("[PERFORMANCE HINT] GFL-Cache: Erstelle statische Tensoren zum ersten Mal.")
-                                # Greife direkt auf die skalaren Attribute des einzelnen Verteilungsobjekts zu.
-                                bins_lower_bound_scalar = base_distr.bins_lower_bound
-                                bin_width_scalar = base_distr._bin_width
-                                
-                                # Wandle sie in Tensoren um und forme sie für Broadcasting.
-                                # Die Form (1, 1, 1) ist kompatibel mit dem Ziel-Tensor [B, N_Vars, H].
-                                self._cached_gfl_bins_lower = torch.tensor(bins_lower_bound_scalar, device=device).view(1, 1, 1)
-                                self._cached_gfl_bin_widths = torch.tensor(bin_width_scalar, device=device).view(1, 1, 1)
-
-                            # Hole gecachte Tensoren, Anzahl der Bins und Logits direkt vom Objekt.
-                            all_bins_lower = self._cached_gfl_bins_lower
-                            all_bin_widths = self._cached_gfl_bin_widths
-                            num_bins = base_distr.num_bins
-                            all_logits = base_distr.logits # Shape: [B, N_Vars, H, N_Bins]
-
-                            # --- Vollständig vektorisierte GFL-Implementierung ---
-                            # Diese Logik bleibt im Kern gleich, arbeitet aber jetzt mit den direkt
-                            # abgerufenen, korrekt geformten Tensoren.
-                            target_cont_idx = (norm_target_for_loss - all_bins_lower) / all_bin_widths
-                            target_cont_idx = torch.clamp(target_cont_idx, 0, num_bins - 1)
-                            idx_lower = torch.floor(target_cont_idx).long()
-                            idx_upper = torch.ceil(target_cont_idx).long()
-                            idx_lower = torch.clamp(idx_lower, 0, num_bins - 1)
-                            idx_upper = torch.clamp(idx_upper, 0, num_bins - 1)
-                            weight_upper = target_cont_idx - idx_lower.float()
-                            weight_lower = 1.0 - weight_upper
-                            idx_lower_g = idx_lower.unsqueeze(-1)
-                            idx_upper_g = idx_upper.unsqueeze(-1)
-                            log_probs = F.log_softmax(all_logits, dim=-1)
-                            log_prob_lower = torch.gather(log_probs, -1, idx_lower_g).squeeze(-1)
-                            log_prob_upper = torch.gather(log_probs, -1, idx_upper_g).squeeze(-1)
-                            loss_dfl = - (weight_lower * log_prob_lower + weight_upper * log_prob_upper)
-                            probs = torch.softmax(all_logits, dim=-1)
-                            prob_lower = torch.gather(probs, -1, idx_lower_g).squeeze(-1)
-                            prob_upper = torch.gather(probs, -1, idx_upper_g).squeeze(-1)
-                            pt = torch.where(idx_lower == idx_upper, prob_lower, prob_lower + prob_upper)
-                            focal_weight = (1 - pt).pow(config.gfl_gamma)
-                            gfl_loss_tensor = focal_weight * loss_dfl
-                            normalized_loss = gfl_loss_tensor.mean()
-
+                            epsilon = 0.1
+                            cdf_upper = base_distr.cdf(norm_target_for_loss + epsilon)
+                            cdf_lower = base_distr.cdf(norm_target_for_loss - epsilon)
+                            pt = torch.clamp(cdf_upper - cdf_lower, min=1e-9)
+                            pt_body = pt[is_in_body]
+                            if pt_body.numel() > 0:
+                                log_loss_part = -torch.log(pt_body)
+                                focal_weight = (1 - pt_body).pow(config.gfl_gamma)
+                                l_body = (focal_weight * log_loss_part).mean()
+                            else:
+                                l_body = torch.tensor(0.0, device=device)
                         else: # Fallback auf CRPS
-                            normalized_loss = crps_loss(base_distr, norm_target_for_loss).mean()
+                            crps_per_point = crps_loss(base_distr, norm_target_for_loss)
+                            crps_body = crps_per_point[is_in_body]
+                            if crps_body.numel() > 0:
+                                l_body = crps_body.mean()
+                            else:
+                                l_body = torch.tensor(0.0, device=device)
 
-                        # === NEU: Jerk-Penalty für die Xi-Parameter ===
-                        jerk_loss = torch.tensor(0.0, device=device)
-                        if config.jerk_loss_coef > 0:
-                            # Greife direkt auf die Tensoren zu. Shape: [Batch, Anzahl_Variablen, Horizont]
-                            lower_xi = base_distr.lower_gp_xi
-                            upper_xi = base_distr.upper_gp_xi
+                        # 3. Calculate L_tail (NLL for tail points)
+                        #    This gives the TailsHead a direct, non-negotiable learning signal.
+                        log_probs = base_distr.log_prob(norm_target_for_loss)
+                        tail_log_probs = log_probs[is_in_tail]
+                        if tail_log_probs.numel() > 0:
+                            l_tail = -tail_log_probs.mean()
+                        else:
+                            l_tail = torch.tensor(0.0, device=device)
 
-                            # Permutiere die Dimensionen, um die Form [Batch, Horizont, Anzahl_Variablen] zu erhalten.
-                            lower_xi_permuted = lower_xi.permute(0, 2, 1)
-                            upper_xi_permuted = upper_xi.permute(0, 2, 1)
+                        # 4. Combine losses. We reuse the existing variable names to minimize code changes.
+                        # `normalized_loss` now represents the body loss.
+                        # `nll_loss` now represents the tail loss, weighted by `nll_loss_coef`.
+                        normalized_loss = l_body
+                        nll_loss = l_tail
 
-                            # Konkateniere entlang der letzten Dimension, um alle Parameter zu kombinieren.
-                            # Ergebnis-Shape: [Batch, Horizont, Anzahl_Variablen * 2]
-                            all_xi = torch.cat([lower_xi_permuted, upper_xi_permuted], dim=-1)
-                            
-                            # Wende die Finite-Differenzen-Formel für den "Jerk" entlang der Horizont-Dimension (dim=1) an.
-                            # Dies erfordert eine minimale Horizontlänge von 4.
-                            if all_xi.shape[1] >= 4:
-                                jerk = all_xi[:, 3:, :] - 3 * all_xi[:, 2:-1, :] + 3 * all_xi[:, 1:-2, :] - all_xi[:, :-3, :]
-                                jerk_loss = torch.mean(jerk**2)
-
-                        total_loss = normalized_loss + config.loss_coef * loss_importance + config.jerk_loss_coef * jerk_loss
+                        total_loss = normalized_loss + config.loss_coef * loss_importance + config.nll_loss_coef * nll_loss
 
                         # --- NEU: Skaliere den Loss und führe Backward-Pass aus ---
                         scaled_loss = total_loss / accumulation_steps
@@ -699,6 +677,7 @@ class DUETProb(ModelBase):
                         epoch_crps_losses.append(denorm_crps_loss.item())
                         epoch_normalized_losses.append(normalized_loss.item())
                         epoch_importance_losses.append(loss_importance.item())
+                        epoch_nll_losses.append(nll_loss.item())
 
                         # === FIX: Addiere zur laufenden Summe hinzu, anstatt Tensoren zu speichern ===
                         if sum_gate_weights_linear is not None and batch_gate_weights_linear.numel() > 0:
@@ -776,13 +755,14 @@ class DUETProb(ModelBase):
                 avg_train_crps_loss = np.mean(epoch_crps_losses)
                 avg_train_norm_loss = np.mean(epoch_normalized_losses)
                 avg_train_importance_loss = np.mean(epoch_importance_losses)
+                avg_train_nll_loss = np.mean(epoch_nll_losses)
 
                 writer.add_scalar("Loss/Train_Total", avg_train_total_loss, epoch)
                 writer.add_scalar("Loss_Normalized/Train_Loss", avg_train_norm_loss, epoch)
-                writer.add_scalar("Loss/Train_CRPS", avg_train_crps_loss, epoch)
+                writer.add_scalar("Loss_Denormalized/Train_CRPS", avg_train_crps_loss, epoch)
                 writer.add_scalar("Loss/Train_Importance", avg_train_importance_loss, epoch)
-                if config.jerk_loss_coef > 0:
-                    writer.add_scalar("Loss/Train_Jerk", jerk_loss.item(), epoch)
+                if config.nll_loss_coef > 0:
+                    writer.add_scalar("Loss/Train_NLL", avg_train_nll_loss, epoch)
                 
                 for name, losses in epoch_channel_losses.items():
                     writer.add_scalar(f"Loss_per_Channel/Train_{name}", np.mean(losses), epoch)
@@ -832,6 +812,29 @@ class DUETProb(ModelBase):
                 if num_batches_processed > 0:
                     avg_p_learned = sum_p_learned / num_batches_processed
                     avg_p_final = sum_p_final / num_batches_processed
+
+                # === NEU: Extrahiere Statistiken der letzten Verteilung für das Logging ===
+                dist_stats = {}
+                with torch.no_grad():
+                    # base_distr ist die letzte berechnete Verteilung aus der Trainingsschleife
+                    if 'base_distr' in locals():
+                        dist_stats['xi_mean'] = base_distr.lower_gp_xi.mean().item()
+                        dist_stats['xi_std'] = base_distr.lower_gp_xi.std().item()
+                        dist_stats['beta_mean'] = base_distr.lower_gp_beta.mean().item()
+                        dist_stats['beta_std'] = base_distr.lower_gp_beta.std().item()
+                        
+                        bin_probs = torch.softmax(base_distr.logits, dim=-1)
+                        entropy = -torch.sum(bin_probs * torch.log(bin_probs + 1e-9), dim=-1).mean()
+                        dist_stats['logits_entropy'] = entropy.item()
+                        
+                        # Logge die extrahierten Statistiken nach TensorBoard
+                        writer.add_scalar("Distribution_Stats/xi_mean", dist_stats['xi_mean'], epoch)
+                        writer.add_scalar("Distribution_Stats/xi_std", dist_stats['xi_std'], epoch)
+                        writer.add_scalar("Distribution_Stats/beta_mean", dist_stats['beta_mean'], epoch)
+                        writer.add_scalar("Distribution_Stats/beta_std", dist_stats['beta_std'], epoch)
+                        writer.add_scalar("Distribution_Stats/logits_entropy", dist_stats['logits_entropy'], epoch)
+
+                metric_for_optimization = float('nan') # Fallback, falls keine Validierung stattfindet
 
                 # --- Validierung ---
                 if valid_data_loader is not None:
@@ -967,6 +970,26 @@ class DUETProb(ModelBase):
                 # NEUER FIX: Erzwinge das Schreiben der TensorBoard-Logs auf die Festplatte am Ende jeder Epoche.
                 writer.flush()
 
+                # === NEU: Logge eine prägnante Zusammenfassung in eine Textdatei ===
+                epoch_duration = time.time() - epoch_start_time
+                summary_metrics = {
+                    "epoch": epoch + 1,
+                    "duration_s": epoch_duration,
+                    "lr": optimizer.param_groups[0]['lr'],
+                    "train_loss_total": avg_train_total_loss,
+                    "train_loss_norm": avg_train_norm_loss,
+                    "train_loss_nll": avg_train_nll_loss,
+                    "train_loss_importance": avg_train_importance_loss,
+                    "validation_metric": metric_for_optimization,
+                    "xi_mean": dist_stats.get('xi_mean', float('nan')),
+                    "xi_std": dist_stats.get('xi_std', float('nan')),
+                    "beta_mean": dist_stats.get('beta_mean', float('nan')),
+                    "beta_std": dist_stats.get('beta_std', float('nan')),
+                    "logits_entropy": dist_stats.get('logits_entropy', float('nan')),
+                }
+                self._log_epoch_summary_to_file(summary_metrics)
+                # === ENDE NEUES LOGGING ===
+
         finally:
             # Lade den besten Zustand vom EarlyStopping und speichere ihn
             if self.early_stopping and self.early_stopping.check_point:
@@ -985,6 +1008,37 @@ class DUETProb(ModelBase):
         if self.checkpoint_path:
             self.load(self.checkpoint_path)
         return self
+
+    def _log_epoch_summary_to_file(self, metrics: Dict[str, Any]):
+        """Schreibt eine formatierte Zusammenfassung der Epochen-Metriken in eine Log-Datei."""
+        log_file_path = os.path.join(self.config.log_dir, 'training_summary.log')
+
+        # Erstelle einen Header, wenn die Datei neu ist
+        if not os.path.exists(log_file_path):
+            with open(log_file_path, 'w') as f:
+                f.write(f"Training Summary for {self.model_name}\n")
+                f.write(f"Log started at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+        summary_str = f"""
+============================== EPOCH {metrics['epoch']:<4} COMPLETE ==============================
+--- Performance ---
+Duration          : {metrics['duration_s']:.2f} s
+Learning Rate     : {metrics['lr']:.2e}
+Train Loss (Total): {metrics['train_loss_total']:.6f}
+Validation Metric : {metrics['validation_metric']:.6f}  (Lower is better)
+
+--- Loss Components (Train) ---
+Normalized Loss   : {metrics['train_loss_norm']:.6f}  (CRPS or GFL on normalized data)
+NLL Loss          : {metrics['train_loss_nll']:.6f}  (Signal for tails)
+Importance Loss   : {metrics['train_loss_importance']:.6f}  (MoE balance)
+
+--- Distribution Stability (Train) ---
+Tail Shape (xi)   : Mean = {metrics['xi_mean']:.4f}, Std = {metrics['xi_std']:.4f}
+Tail Scale (beta) : Mean = {metrics['beta_mean']:.4f}, Std = {metrics['beta_std']:.4f}
+Bin Entropy       : {metrics['logits_entropy']:.4f} (Higher = more uncertain)
+"""
+        with open(log_file_path, 'a') as f:
+            f.write(summary_str)
 
     def validate(self, valid_data_loader, writer: Optional[SummaryWriter], epoch: Optional[int], device: torch.device, desc: str = "Validation") -> tuple[np.ndarray, np.ndarray]:
         all_denorm_losses, all_norm_losses = [], []
