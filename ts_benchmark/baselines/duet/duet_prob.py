@@ -782,6 +782,13 @@ class DUETProb(ModelBase):
                         writer.add_scalar("F) Distribution Stats (Train)/scale_mean", dist_stats['scale_mean'], epoch)
                         writer.add_scalar("F) Distribution Stats (Train)/scale_std", dist_stats['scale_std'], epoch)
 
+                        # NEU: Logge die Skew-Statistiken, falls vorhanden (für SkewedStudentT)
+                        if hasattr(base_distr, 'skew'):
+                            dist_stats['skew_mean'] = base_distr.skew.mean().item()
+                            dist_stats['skew_std'] = base_distr.skew.std().item()
+                            writer.add_scalar("F) Distribution Stats (Train)/skew_mean", dist_stats['skew_mean'], epoch)
+                            writer.add_scalar("F) Distribution Stats (Train)/skew_std", dist_stats['skew_std'], epoch)
+
                 metric_for_optimization = float('nan') # Fallback, falls keine Validierung stattfindet
 
                 # --- Validierung ---
@@ -929,6 +936,8 @@ class DUETProb(ModelBase):
                     "loc_std": dist_stats.get('loc_std', float('nan')),
                     "scale_mean": dist_stats.get('scale_mean', float('nan')),
                     "scale_std": dist_stats.get('scale_std', float('nan')),
+                    "skew_mean": dist_stats.get('skew_mean', float('nan')),
+                    "skew_std": dist_stats.get('skew_std', float('nan')),
                 }
                 self._log_epoch_summary_to_file(summary_metrics)
                 # === ENDE NEUES LOGGING ===
@@ -978,6 +987,7 @@ Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
 Degrees of Freedom (df) : Mean = {metrics['df_mean']:.4f}, Std = {metrics['df_std']:.4f}
 Location (loc)          : Mean = {metrics['loc_mean']:.4f}, Std = {metrics['loc_std']:.4f}
 Scale (scale)           : Mean = {metrics['scale_mean']:.4f}, Std = {metrics['scale_std']:.4f}
+Skew (skew)             : Mean = {metrics['skew_mean']:.4f}, Std = {metrics['skew_std']:.4f}
 """
         with open(log_file_path, 'a') as f:
             f.write(summary_str)

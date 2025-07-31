@@ -11,7 +11,7 @@ from ts_benchmark.baselines.duet.layers.linear_extractor_cluster import Linear_e
 from ts_benchmark.baselines.duet.utils.masked_attention import Mahalanobis_mask, Encoder, EncoderLayer, FullAttention, AttentionLayer
 
 # === NEUE PROBABILISTISCHE KOMPONENTEN ===
-from ts_benchmark.baselines.duet.student_t_standalone import StudentTOutput, MLPProjectionHead
+from ts_benchmark.baselines.duet.skewed_student_t_standalone import StudentTOutput, MLPProjectionHead
 from ts_benchmark.baselines.duet.layers.esn.reservoir_expert import UnivariateReservoirExpert, MultivariateReservoirExpert
 
 class DenormalizingDistribution:
