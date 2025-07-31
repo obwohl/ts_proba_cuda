@@ -29,6 +29,22 @@ class DenormalizingDistribution:
         self.std = torch.clamp(stats[:, :, 1], min=STD_FLOOR).unsqueeze(1)
 
     @property
+    def loc(self) -> torch.Tensor:
+        """
+        Gibt den denormalisierten Median (loc) der Verteilung zurück.
+        """
+        # self.base_dist.loc hat die Form [B, N_vars, H]
+        # self.mean/std haben die Form [B, 1, N_vars]
+        
+        # Passe die Dimensionen von mean/std für Broadcasting an
+        mean_for_bcast = self.mean.squeeze(1).unsqueeze(-1) # [B, N_vars, 1]
+        std_for_bcast = self.std.squeeze(1).unsqueeze(-1)   # [B, N_vars, 1]
+        
+        # Denormalisiere den loc-Parameter der Basis-Verteilung
+        # [B, N_vars, H] * [B, N_vars, 1] + [B, N_vars, 1] -> [B, N_vars, H]
+        return self.base_dist.loc * std_for_bcast + mean_for_bcast
+
+    @property
     def batch_shape(self):
         # Definiert die "Größe" der Verteilung
         return self.base_dist.batch_shape

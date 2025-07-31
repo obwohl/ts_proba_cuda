@@ -33,7 +33,7 @@ from ts_benchmark.data.data_source import LocalForecastingDataSource
 
 # --- 1. ZENTRALE KONFIGURATION ---
 STUDY_NAME = "eisbach_96_studentt_mean_nll_loss_eisbach"
-TRIAL_NUMBERS_TO_PLOT = [0, 99, 106]  # Tragen Sie hier die gewünschten Trial-Nummern ein
+TRIAL_NUMBERS_TO_PLOT = [153]  # Tragen Sie hier die gewünschten Trial-Nummern ein
 
 # --- Pfade und Datenkonfiguration (muss mit optuna_full_search.py übereinstimmen) ---
 BASE_RESULTS_DIR = Path(f"results/optuna_heuristic/{STUDY_NAME}")
