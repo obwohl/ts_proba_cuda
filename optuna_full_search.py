@@ -28,13 +28,13 @@ logging.getLogger("optuna").setLevel(logging.INFO)
 
 # --- 2. Feste Trainingsparameter für die lange, intensive Suche ---
 FIXED_PARAMS = {
-    "data_file": "eisbach_airtemp96_pressure96.csv", 
+    "data_file": "combo_96.csv", 
     "horizon": 96,
     "train_ratio_in_tv": 0.8, # NEU: Split-Verhältnis explizit gemacht
     # --- NEU: Wähle die zu optimierende Metrik ---
     # 'cvar': Conditional Value at Risk (Durchschnitt der schlechtesten 5% Fehler) -> robustere Modelle
     # 'avg_crps': Durchschnittlicher CRPS-Fehler über alle Fenster -> beste Durchschnitts-Performance
-    "optimization_metric": "cvar",
+    "optimization_metric": "avg_nll",
     # Setze hier einen Kanalnamen (z.B. "wassertemp"), um den Validierungs-Loss nur für diesen Kanal zu berechnen.
     # Setze auf `None`, um den Durchschnitt über alle Kanäle zu verwenden (Standardverhalten).
     "optimization_target_channel": "wassertemp",
@@ -56,7 +56,7 @@ FIXED_PARAMS = {
     "max_memory_gb": None,
     "profile_epoch": None,
     # NEU: Schalter zum Deaktivieren der speicherintensiven Plots während der Optuna-Suche.
-    "enable_diagnostic_plots": True,
+    "enable_diagnostic_plots": False,
     # "channel_adjacency_prior": [ isarpegel
     #     [1, 1, 0, 0, 0, 0],  
     #     [1, 1, 0, 0, 0, 0],
@@ -65,17 +65,17 @@ FIXED_PARAMS = {
     #     [1, 1, 1, 1, 1, 1],
     #     [1, 1, 1, 1, 1, 1], ]
 
-    "channel_adjacency_prior": [
-        [1, 1, 1],  #wasser
-        [0, 1, 1], #air
-        [0, 0, 1], #pressure
-    ]
+    # "channel_adjacency_prior": [
+    #     [1, 1, 1],  #wasser
+    #     [0, 1, 1], #air
+    #     [0, 0, 1], #pressure
+    # ]
 }
 
 def get_suggested_params(trial: optuna.Trial) -> dict:
     """Schlägt einen Satz von Hyperparametern vor."""
     params = {}
-    params["seq_len"] = trial.suggest_categorical("seq_len", [96, 192, 384])
+    params["seq_len"] = trial.suggest_categorical("seq_len", [96, 192, 384, 480])
     params["norm_mode"] = trial.suggest_categorical("norm_mode", ["subtract_last", "subtract_median"])
     params["lr"] = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
     params["d_model"] = trial.suggest_categorical("d_model", [32, 64, 128, 256])
@@ -98,7 +98,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params["fc_dropout"] = trial.suggest_float("fc_dropout", 0.0, 0.5)
     
     # Optuna schlägt die exakte Batch-Größe vor, die verwendet werden soll.
-    params["batch_size"] = trial.suggest_categorical("batch_size", [512, 1024])
+    params["batch_size"] = trial.suggest_categorical("batch_size", [256, 512, 1024])
 
     # --- ENTFERNT: Veraltete SBP-spezifische Loss-Parameter ---
     # Die Student's T-Verteilung wird mit standardmäßiger Negative Log-Likelihood (NLL) trainiert.
@@ -161,7 +161,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params["loss_target_clip"] = trial.suggest_categorical("loss_target_clip", [None, 5.0, 10.0, 15.0])
 
     # --- NEU: Channel Adjacency Prior an/ausschalten ---
-    params["use_channel_adjacency_prior"] = trial.suggest_categorical("use_channel_adjacency_prior", [True, False])
+    params["use_channel_adjacency_prior"] = trial.suggest_categorical("use_channel_adjacency_prior", [False])
 
     return params
 
