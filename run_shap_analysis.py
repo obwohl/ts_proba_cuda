@@ -430,56 +430,77 @@ def plot_all_channels_colored_by_importance(instance_data, event_shap_values, ta
     plt.close(fig)
     print(f"✅ Farbiger Multi-Kanal Zeitreihen-Plot gespeichert unter: {output_filename}")
 
-def plot_all_channels_with_background_importance(instance_data, event_shap_values, target_channel_name, channel_names, output_filename):
+def plot_all_channels_with_importance_bars(instance_data, event_shap_values, target_channel_name, channel_names, output_filename):
     """
-    Erstellt einen Multi-Panel-Plot, bei dem der Hintergrund jedes Plots
-    die Richtung des Einflusses auf einer SymLog-Skala anzeigt.
+    Erstellt einen Multi-Panel-Plot, der für jeden Kanal die Zeitreihe (schwarze Linie)
+    und den gerichteten SHAP-Beitrag (farbige Balken) auf einer zweiten Y-Achse darstellt.
+    Dies ist die ultimative Visualisierung, die den Verlauf mit seinem Einfluss kombiniert.
     """
-    from matplotlib.colors import SymLogNorm
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
 
     n_features = instance_data.shape[2]
     seq_len = instance_data.shape[1]
 
-    fig, axes = plt.subplots(n_features, 1, figsize=(20, 5 * n_features), sharex=True, constrained_layout=True)
+    fig, axes = plt.subplots(n_features, 1, figsize=(20, 6 * n_features), sharex=True, constrained_layout=True)
     fig.suptitle(
-        f"Einflussrichtung auf '{target_channel_name}' (SymLog-Skala)\n(Gelb: Positiver Einfluss, Violett: Negativer Einfluss)",
+        f"Zeitreihenverlauf vs. SHAP-Beitrag zur Vorhersage von '{target_channel_name}'",
         fontsize=18, weight='bold'
     )
 
-    # 1. Berechne die *gerichtete* Wichtigkeit (ohne Absolutwert)
+    # 1. Berechne die gerichtete Wichtigkeit (mittlerer SHAP-Wert) EINMAL für alle Plots
     directional_importance = np.mean(event_shap_values, axis=1)
+    x_axis = np.arange(seq_len)
 
-    # 2. Erstelle eine symmetrisch-logarithmische Normalisierung
-    max_abs_val = np.max(np.abs(directional_importance))
-    # linthresh definiert den Bereich um 0, der linear skaliert wird.
-    # Ein kleiner Wert dehnt die Werte nahe 0 stark.
-    linthresh = max_abs_val * 0.01 if max_abs_val > 0 else 1e-9
-    norm = SymLogNorm(linthresh=linthresh, vmin=-max_abs_val, vmax=max_abs_val)
-    cmap = plt.cm.viridis # Wie gewünscht: Viridis
+    # 2. Definiere die Farben für die Balken EINMAL
+    bar_colors = ['#E15759' if val > 0 else '#4E79A7' for val in directional_importance]
 
+    # 3. Bestimme die Y-Achsen-Grenzen für die SHAP-Balken EINMAL, um Konsistenz zu gewährleisten
+    max_abs_shap = np.max(np.abs(directional_importance)) * 1.15 # 15% Puffer
+    shap_ylim = (-max_abs_shap, max_abs_shap) if max_abs_shap > 0 else (-1, 1)
+
+    # Iteriere durch jeden Kanal und erstelle einen eigenen Subplot
     for i, ax in enumerate(axes):
+        # --- Linke Y-Achse: Zeitreihenwert ---
         series_data = instance_data[0, :, i]
-        x_axis = np.arange(seq_len)
-
-        points = np.array([x_axis, series_data]).T.reshape(-1, 1, 2)
-        segments = np.concatenate([points[:-1], points[1:]], axis=1)
-
-        lc = LineCollection(segments, cmap=cmap, norm=norm)
-        segment_colors = (directional_importance[:-1] + directional_importance[1:]) / 2
-        lc.set_array(segment_colors)
-        lc.set_linewidth(3.0)
-
-        ax.add_collection(lc)
-        ax.set_xlim(x_axis.min(), x_axis.max())
+        ax.plot(x_axis, series_data, color='black', linewidth=1.5, zorder=10)
+        ax.set_ylabel(f"Wert '{channel_names[i]}'", color='black', fontsize=12)
+        ax.tick_params(axis='y', labelcolor='black')
+        ax.set_title(f"Input-Kanal: '{channel_names[i]}'", fontsize=14)
+        # Sorge für etwas Platz
         ax.set_ylim(series_data.min() - 0.1 * np.ptp(series_data), series_data.max() + 0.1 * np.ptp(series_data))
-        ax.set_title(f"Input-Verlauf: '{channel_names[i]}'", fontsize=12)
-        ax.set_ylabel("Wert")
+    """
+    Erstellt ein Balkendiagramm, das die gerichtete Wichtigkeit (mittlerer SHAP-Wert)
+    jedes Input-Zeitschritts quantitativ darstellt, um die Beobachtungen aus dem
+    Hintergrund-Plot zu verifizieren.
+    """
+    seq_len = len(directional_importance)
+    x_axis = np.arange(seq_len)
 
-    fig.colorbar(lc, ax=axes.ravel().tolist(), label="Mittlerer SHAP-Wert (SymLog-Skala)", pad=0.01)
-    axes[-1].set_xlabel("Zeitschritt im Input-Fenster")
+    fig, ax = plt.subplots(figsize=(20, 7))
+
+    # Verwende die Farben aus dem Plotting-Style für Konsistenz
+    # Rot (positiv) und Blau (negativ)
+    colors = ['#E15759' if val > 0 else '#4E79A7' for val in directional_importance]
+
+    ax.bar(x_axis, directional_importance, color=colors, width=1.0)
+
+    ax.axhline(0, color='black', linewidth=0.8)
+    ax.set_title(f"Quantitative Event-Wichtigkeit für '{target_channel_name}'\n(Mittlerer SHAP-Wert über den gesamten Horizont pro Input-Zeitschritt)")
+    ax.set_xlabel("Zeitschritt im Input-Fenster")
+    ax.set_ylabel("Mittlerer SHAP-Wert (Beitrag zur Vorhersage)")
+    ax.set_xlim(-0.5, seq_len - 0.5)
+
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='#E15759', label='Positiver Beitrag (hebt Vorhersage an)'),
+        Patch(facecolor='#4E79A7', label='Negativer Beitrag (senkt Vorhersage ab)')]
+    ax.legend(handles=legend_elements, loc='best')
+
+    plt.tight_layout()
     plt.savefig(output_filename)
     plt.close(fig)
-    print(f"✅ Farbiger SymLog-direktionaler Plot gespeichert unter: {output_filename}")
+    print(f"✅ Quantitativer Wichtigkeits-Plot gespeichert unter: {output_filename}")
 
 def plot_event_saliency_with_prediction(instance_data, prediction_data, event_shap_values, target_channel_idx, channel_names, output_filename):
     """
@@ -895,14 +916,25 @@ def main():
         output_filename="shap_colored_multichannel_importance.png"
     )
 
-    # 7. NEU: Visualisiere den farbigen Zeitreihen-Plot (Richtung der Wichtigkeit)
-    print("\nVisualisiere den direktionalen farbigen Multi-Kanal Zeitreihen-Plot (SymLog)...")
-    plot_all_channels_colored_by_symlog_importance(
+    # 7. NEU: Visualisiere den Zeitreihen-Plot mit eingefärbtem Hintergrund
+    print("\nVisualisiere den Zeitreihen-Plot mit Wichtigkeits-Hintergrund (SymLog)...")
+    plot_all_channels_with_background_importance(
         instance_data=instance_to_explain,
         event_shap_values=event_shap_values,
         target_channel_name=TARGET_CHANNEL,
         channel_names=channel_names,
-        output_filename="shap_colored_multichannel_symlog_directional_importance.png"
+        output_filename="shap_background_importance.png"
+    )
+
+    # 8. NEU: Quantitativer Plot der gerichteten Wichtigkeit als Balkendiagramm
+    print("\nErstelle quantitativen Plot der gerichteten Wichtigkeit zur Verifikation...")
+    # Die gerichtete Wichtigkeit ist der mittlere SHAP-Wert pro Input-Zeitschritt über den gesamten Horizont.
+    # Wir berechnen sie hier, um sie an die neue Plot-Funktion zu übergeben.
+    directional_importance = np.mean(event_shap_values, axis=1)
+    plot_directional_importance_bars(
+        directional_importance=directional_importance,
+        target_channel_name=TARGET_CHANNEL,
+        output_filename="shap_directional_importance_bars.png"
     )
 
 if __name__ == "__main__":
