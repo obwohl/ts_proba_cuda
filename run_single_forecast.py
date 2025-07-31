@@ -14,7 +14,7 @@ from ts_benchmark.baselines.duet.duet_prob import TransformerConfig
 # Die Spaltenreihenfolge muss exakt der beim Training entsprechen!
 SERIES_ORDER = ['wassertemp', 'airtemp_96', 'pressure_96']
 # Die Quantile, die vorhergesagt werden sollen.
-QUANTILES_TO_PREDICT = [0.01, 0.05, 0.2, 0.5, 0.8, 0.95, 0.99]
+QUANTILES_TO_PREDICT = [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]
 
 def run_forecast(checkpoint_path: Path, data_path: Path, output_path: Path):
     """
