@@ -1,5 +1,6 @@
 *.csv
 result/
+results/
 figures/
 .idea/
 .vscode/
@@ -12,7 +13,7 @@ venv/
 __pycache__/
 *.pyc
 *.pkl
-*.pt
+
 *.0
 *log.txt
 
@@ -23,6 +24,6 @@ metadata.json
 
 #optuna
 *study.db
-results/
+
 inference_checkpoints/
 *.png
