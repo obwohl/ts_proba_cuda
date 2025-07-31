@@ -1,4 +1,3 @@
-# optuna_run_heuristic_search.py
 import optuna
 import os
 import subprocess
@@ -42,7 +41,10 @@ FIXED_PARAMS = {
     "num_epochs": 100,
     "patience": 5,
     "early_stopping_delta": 1e-4,
-
+    
+    # NEU: explizit 'student_t' als Verteilungskopf festlegen
+    "distribution_family": "student_t",
+    
     "num_workers": int(os.getenv("TRIAL_WORKERS", "4")),
     "quantiles": [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99], # <-- HIER ERWEITERN
     "lradj": "cosine_warmup", # Um Cosine Annealing zu verwenden
@@ -73,16 +75,16 @@ FIXED_PARAMS = {
 def get_suggested_params(trial: optuna.Trial) -> dict:
     """Schlägt einen Satz von Hyperparametern vor."""
     params = {}
-    params["seq_len"] = trial.suggest_categorical("seq_len", [48, 96, 192, 384])
+    params["seq_len"] = trial.suggest_categorical("seq_len", [96, 192, 384])
     params["norm_mode"] = trial.suggest_categorical("norm_mode", ["subtract_last", "subtract_median"])
     params["lr"] = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
-    params["d_model"] = trial.suggest_categorical("d_model", [32, 64, 128, 256, 512])
-    params["d_ff"] = trial.suggest_categorical("d_ff", [32, 64, 128, 256, 512])
+    params["d_model"] = trial.suggest_categorical("d_model", [32, 64, 128, 256])
+    params["d_ff"] = trial.suggest_categorical("d_ff", [32, 64, 128, 256])
     params["e_layers"] = trial.suggest_int("e_layers", 1, 3)
 
     # --- NEU: moving_avg als kategorialer Hyperparameter ---
     # Gib hier sinnvolle Werte basierend auf der bekannten Periodizität deiner Daten an.
-    params["moving_avg"] = trial.suggest_categorical("moving_avg", [5, 25, 49, 97, 193]) # für wasserpegel schwierig zu raten, stündlich, halbtäglich, täglich, oder zweitäglich? soll optuna rausfinden.
+    params["moving_avg"] = trial.suggest_categorical("moving_avg", [25, 49, 97, 193]) # für wasserpegel schwierig zu raten, stündlich, halbtäglich, täglich, oder zweitäglich? soll optuna rausfinden.
 
     # --- KORREKTUR: Statischer Suchraum für n_heads ---
     # 1. Schlage n_heads immer aus der vollen Liste vor, um den Suchraum statisch zu halten.
@@ -96,17 +98,17 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params["fc_dropout"] = trial.suggest_float("fc_dropout", 0.0, 0.5)
     
     # Optuna schlägt die exakte Batch-Größe vor, die verwendet werden soll.
-    params["batch_size"] = trial.suggest_categorical("batch_size", [128, 256, 512, 1024])
+    params["batch_size"] = trial.suggest_categorical("batch_size", [512, 1024])
 
-    params["loss_coef"] = trial.suggest_float("loss_coef", 0.1, 2.0, log=True)
+    # --- ENTFERNT: Veraltete SBP-spezifische Loss-Parameter ---
+    # Die Student's T-Verteilung wird mit standardmäßiger Negative Log-Likelihood (NLL) trainiert.
+    # Daher werden loss_function, gfl_gamma und nll_loss_coef nicht mehr benötigt.
+    # params["loss_coef"] = trial.suggest_float("loss_coef", 0.1, 2.0, log=True)
+    # params["loss_function"] = "gfl" 
+    # if params["loss_function"] == 'gfl':
+    #     params["gfl_gamma"] = trial.suggest_float("gfl_gamma", 0.5, 5.0)
+    # params["nll_loss_coef"] = trial.suggest_float("nll_loss_coef", 1e-4, 0.5, log=True)
     
-    # --- NEU: Loss-Funktion als Hyperparameter ---
-    # Die Analyse hat gezeigt, dass 'gfl' durchweg zu sinnvollerem Modellverhalten führt.
-    # Wir entfernen 'crps' aus dem Suchraum, um "faule" Modelle zu vermeiden. Diese produzieren nur zickzackmüll
-    params["loss_function"] = "gfl" 
-    if params["loss_function"] == 'gfl': # Diese Bedingung ist jetzt immer wahr, aber schadet nicht.
-        params["gfl_gamma"] = trial.suggest_float("gfl_gamma", 0.5, 5.0)
-
     params["use_agc"] = trial.suggest_categorical("use_agc", [True, False])
     if params["use_agc"]:
         params["agc_lambda"] = trial.suggest_float("agc_lambda", 0.001, 0.1, log=True)
@@ -148,16 +150,15 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
         # NEU: Weight Decay (L2-Regularisierung) für die multivariaten ESN-Readout-Schichten
         params["esn_multi_weight_decay"] = trial.suggest_float("esn_multi_weight_decay", 1e-6, 1e-1, log=True)
 
+    # --- ÜBERPRÜFT: Parameter des Projection Head ---
+    # Der Suchraum für die Architektur des Projection Head ist generisch und
+    # funktioniert auch mit dem einfacheren Output der Student's T-Verteilung.
     params["projection_head_layers"] = trial.suggest_int("projection_head_layers", 2, 4)
     if params["projection_head_layers"] > 0:
         params["projection_head_dim_factor"] = trial.suggest_categorical("projection_head_dim_factor", [1, 2, 4, 8])
         params["projection_head_dropout"] = trial.suggest_float("projection_head_dropout", 0.0, 0.5)
 
     params["loss_target_clip"] = trial.suggest_categorical("loss_target_clip", [None, 5.0, 10.0, 15.0])
-
-    # --- NEU: Hybrider Loss GFL + NLL ---
-    # Koeffizient für den NLL-Anteil am Gesamtverlust.
-    params["nll_loss_coef"] = trial.suggest_float("nll_loss_coef", 1e-4, 0.5, log=True)
 
     # --- NEU: Channel Adjacency Prior an/ausschalten ---
     params["use_channel_adjacency_prior"] = trial.suggest_categorical("use_channel_adjacency_prior", [True, False])
@@ -183,6 +184,8 @@ def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
     model = None # Ensure model is defined in the outer scope for the finally block
     try:
         # 1. Initialisiere das Modell mit den geprüften Parametern
+        # Die Logik für die Loss-Funktion ist nun im DUETProb-Modell selbst enthalten
+        # und wird basierend auf der `distribution_family` ausgewählt.
         model = DUETProb(**model_hyper_params)
 
         # 2. Führe das Training aus.
@@ -200,6 +203,7 @@ def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
         device = next(model.model.parameters()).device
         
         # Die `validate`-Funktion gibt jetzt ein Array aller Fenster-Losses zurück
+        # Die Validierungsmetrik bleibt CRPS, da es eine gute, verteilungsunabhängige Metrik ist.
         all_window_losses, _ = model.validate(valid_loader, None, None, device, "Final Validation")
 
         if not np.all(np.isfinite(all_window_losses)):
@@ -228,27 +232,27 @@ def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
             print("  -> Calculating final metrics based on the mean loss across all channels per window.")
 
         # Berechne die beiden Zielmetriken auf dem korrekten Datensatz
-        avg_crps = float(np.mean(losses_for_final_metric))
-        cvar_crps = calculate_cvar(losses_for_final_metric, model_hyper_params["cvar_alpha"])
+        avg_nll = float(np.mean(losses_for_final_metric))
+        cvar_nll = calculate_cvar(losses_for_final_metric, model_hyper_params["cvar_alpha"])
 
         # Speichere beide Metriken als User-Attribute, damit sie immer verfügbar sind
-        trial.set_user_attr("avg_crps", avg_crps)
-        trial.set_user_attr("cvar_crps", cvar_crps)
+        trial.set_user_attr("avg_nll", avg_nll)
+        trial.set_user_attr("cvar_nll", cvar_nll)
         trial.set_user_attr("final_optimization_target", final_target_name)
 
         # Logge die finalen Metriken übersichtlich
         cvar_alpha = model_hyper_params["cvar_alpha"]
         print("\n" + "-"*25 + f" TRIAL #{trial_num} FINAL METRICS " + "-"*25)
-        print(f"  -> Avg CRPS (on selected losses): {avg_crps:.6f}")
-        print(f"  -> CVaR@{cvar_alpha} CRPS (on selected losses): {cvar_crps:.6f}")
+        print(f"  -> Avg NLL (on selected losses): {avg_nll:.6f}")
+        print(f"  -> CVaR@{cvar_alpha} NLL (on selected losses): {cvar_nll:.6f}")
         print("-"*(50 + len(str(trial_num)) + 18) + "\n")
 
         # Gib die ausgewählte Zielmetrik für die Optimierung zurück
         optimized_metric = model_hyper_params.get("optimization_metric", "cvar")
         if optimized_metric == "cvar":
-            return cvar_crps
-        else: # 'avg_crps' oder Fallback
-            return avg_crps
+            return cvar_nll
+        else: # 'avg_nll' oder Fallback
+            return avg_nll
 
     except optuna.exceptions.TrialPruned:
         # Wichtig: Wenn ein Trial pruned wird (entweder durch den Pruner oder manuell),
@@ -348,13 +352,13 @@ if __name__ == "__main__":
         
         # Gib die anderen Metriken aus den User-Attributen aus
         print("  - All Metrics:")
-        avg_crps_val = best_trial.user_attrs.get('avg_crps', 'N/A')
-        cvar_crps_val = best_trial.user_attrs.get('cvar_crps', 'N/A')
+        avg_nll_val = best_trial.user_attrs.get('avg_nll', 'N/A')
+        cvar_nll_val = best_trial.user_attrs.get('cvar_nll', 'N/A')
 
-        avg_crps_str = f"{avg_crps_val:.6f}" if isinstance(avg_crps_val, float) else avg_crps_val
-        cvar_crps_str = f"{cvar_crps_val:.6f}" if isinstance(cvar_crps_val, float) else cvar_crps_val
-        print(f"    - Avg CRPS: {avg_crps_str}")
-        print(f"    - CVaR CRPS: {cvar_crps_str}")
+        avg_nll_str = f"{avg_nll_val:.6f}" if isinstance(avg_nll_val, float) else avg_nll_val
+        cvar_nll_str = f"{cvar_nll_val:.6f}" if isinstance(cvar_nll_val, float) else cvar_nll_val
+        print(f"    - Avg NLL: {avg_nll_str}")
+        print(f"    - CVaR NLL: {cvar_nll_str}")
         
         print(f"  - Best Hyperparameters: {best_trial.params}")
         print(f"  - Full User Attributes: {best_trial.user_attrs}")

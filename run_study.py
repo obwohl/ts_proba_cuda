@@ -23,14 +23,14 @@ import signal
 # Alles, was Sie anpassen müssen, ist hier an einem Ort.
 
 # -- Studien-Konfiguration --
-STUDY_NAME = "eisbach_96_new_loss_test_4"
+STUDY_NAME = "eisbach_96_studentt"
 STORAGE_NAME = "sqlite:///optuna_study.db"  # Fester DB-Name. Studien werden intern durch STUDY_NAME unterschieden.
 
 # -- Parallelisierungs-Konfiguration --
 # Wie viele parallele Python-Prozesse (Trials) sollen gestartet werden?
-NUM_PARALLEL_TRIALS = 1
+NUM_PARALLEL_TRIALS = 4
 # Wie viele CPU-Worker soll JEDER Trial für den DataLoader verwenden?
-WORKERS_PER_TRIAL = 8
+WORKERS_PER_TRIAL = 6
 # NEU: Eine Verzögerung zwischen dem Start der Worker, um DB-Race-Conditions zu entschärfen.
 # Dies ist eine zusätzliche Sicherheitsmaßnahme zu den enqueued placeholder trials.
 DELAY_BETWEEN_WORKERS_S = 10
@@ -39,7 +39,7 @@ DELAY_BETWEEN_WORKERS_S = 10
 # Setze auf den Namen der alten Studie, von der die besten Trials übernommen werden sollen.
 # Auf `None` setzen, um diese Funktion zu deaktivieren.
 WARM_START_FROM_OLD_STUDY = None
-NUM_WARM_START_TRIALS_FROM_STUDY = 5
+NUM_WARM_START_TRIALS_FROM_STUDY = 0
 # Pfad zur JSON-Datei für manuelle Warm-Starts. Wird ignoriert, wenn WARM_START_FROM_OLD_STUDY gesetzt ist.
 WARM_START_JSON_FILE = "optuna_warm_starts.json"
 

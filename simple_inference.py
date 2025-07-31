@@ -10,8 +10,7 @@ import inspect
 
 # === IMPORTS FÜR MODELL UND LOSS ===
 from ts_benchmark.baselines.duet.models.duet_prob_model import DUETProbModel
-from ts_benchmark.baselines.duet.duet_prob import TransformerConfig
-from ts_benchmark.baselines.duet.utils.crps import crps_loss
+from ts_benchmark.baselines.duet.duet_prob import TransformerConfig, calculate_cvar
 
 # --- DIAGNOSTIC: WELCHE DATEI WIRD VERWENDET? ---
 print("--- STARTING FILE PATH DIAGNOSTIC ---")
@@ -23,7 +22,7 @@ SERIES_ORDER = ['wassertemp', 'airtemp_96', 'pressure_96']
 QUANTILES_TO_PLOT = [0.01, 0.05, 0.2, 0.5, 0.8, 0.95, 0.99]
 CI_COLORS = ['#c6dbef', '#6baed6', '#08519c'] 
 
-def plot_forecast(history_df, actuals_df, prediction_array, quantiles, output_path, window_info):
+def plot_forecast(history_df, actuals_df, prediction_array, quantiles, output_path, window_info, nll_info):
     """
     Erzeugt und speichert einen Plot der Vorhersage im Vergleich zu den tatsächlichen Werten.
     """
@@ -65,7 +64,7 @@ def plot_forecast(history_df, actuals_df, prediction_array, quantiles, output_pa
 
         ax.plot(actuals_df.index, prediction_array[:, i, median_idx], color="#FF0000", linestyle='--', label="Median Forecast")
 
-        ax.set_title(f'Forecast for "{var_name}" - {window_info}', fontsize=14)
+        ax.set_title(f'Forecast for "{var_name}" - {window_info}\n{nll_info[var_name]}', fontsize=14)
         ax.set_ylabel("Value")
         ax.grid(True, which="both", linestyle='--', linewidth=0.5)
         ax.legend()
@@ -142,43 +141,40 @@ def main():
         input_tensor = torch.tensor(input_df.values, dtype=torch.float32).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            # Das Modell gibt jetzt 6 Werte zurück (final_distr, base_distr, L_importance, gate_weights_linear, gate_weights_esn, selection_counts)
-            distr, _, _, _, _, _ = model(input_tensor)
+            # Das Modell gibt jetzt 9 Werte zurück. Wir brauchen nur den ersten (final_distr).
+            distr, _, _, _, _, _, _, _, _ = model(input_tensor)
             
             actuals_tensor = torch.tensor(actuals_df.values, dtype=torch.float32).unsqueeze(0).to(device)
-            crps_values_per_point = crps_loss(distr, actuals_tensor)
             
-            # === ANFANG DER ÄNDERUNG: CRPS pro Kanal berechnen ===
-            # Aggregiere über Batch und Horizont, behalte die Kanal-Dimension
-            crps_per_channel = crps_values_per_point.mean(dim=(0, 1)) # Ergibt einen Vektor der Länge N_VARS
+            # --- NEU: Berechne NLL statt CRPS ---
+            # log_prob erwartet [B, H, N_vars], was actuals_tensor hat.
+            log_p = distr.log_prob(actuals_tensor)
+            # Wir mitteln über den Horizont, um einen Loss pro Kanal zu erhalten -> [B, N_vars]
+            nll_per_channel = -log_p.mean(dim=1).squeeze(0) # -> [N_vars]
             
-            # Gesamt-CRPS für die Gesamtübersicht
-            mean_crps_for_window = crps_per_channel.mean().item()
+            mean_nll_for_window = nll_per_channel.mean().item()
 
-            print(f"  Window {i+1}/{num_to_plot}: Overall CRPS = {mean_crps_for_window:.4f}")
+            print(f"  Window {i+1}/{num_to_plot}: Overall NLL = {mean_nll_for_window:.4f}")
 
-            # Erstelle einen String für die Anzeige im Plot-Titel
-            crps_str_parts = [f"Overall: {mean_crps_for_window:.3f}"]
+            # Erstelle einen String für die Anzeige im Plot-Titel für jeden Kanal
+            nll_info_dict = {}
             for channel_idx, channel_name in enumerate(SERIES_ORDER):
-                channel_crps = crps_per_channel[channel_idx].item()
-                crps_str_parts.append(f"{channel_name}: {channel_crps:.3f}")
-                print(f"    - CRPS for '{channel_name}': {channel_crps:.4f}")
+                channel_nll = nll_per_channel[channel_idx].item()
+                nll_info_dict[channel_name] = f"NLL: {channel_nll:.4f}"
+                print(f"    - NLL for '{channel_name}': {channel_nll:.4f}")
 
-            crps_details_str = " | ".join(crps_str_parts)
-            # === ENDE DER ÄNDERUNG ===
-            
             # Hole die Vorhersagen für die zu plottenden Quantile
             q_tensor = torch.tensor(QUANTILES_TO_PLOT, device=device, dtype=torch.float32)
+            # distr.icdf gibt bei mehreren Quantilen [B, N_Vars, H, Q] zurück
             quantile_predictions_tensor = distr.icdf(q_tensor)
 
-        # Form für das Plotting anpassen auf [H, V, Q]
-        prediction_array = quantile_predictions_tensor.squeeze(0).cpu().numpy()
+        # Form für das Plotting anpassen: [B, N, H, Q] -> [H, N, Q]
+        prediction_array = quantile_predictions_tensor.squeeze(0).permute(1, 0, 2).cpu().numpy()
 
         # Generiere den Plot
         output_path = output_dir / f"forecast_plot_{i+1}_end_{history_end_idx}.png"
         
-        # Füge die detaillierten CRPS-Scores zum Titel hinzu
-        window_info_with_crps = f"Plot {i+1}/{num_to_plot} (CRPS: {crps_details_str})"
+        window_info = f"Plot {i+1}/{num_to_plot}"
         
         plot_forecast(
             history_df=history_df,
@@ -186,7 +182,8 @@ def main():
             prediction_array=prediction_array,
             quantiles=QUANTILES_TO_PLOT,
             output_path=output_path,
-            window_info=window_info_with_crps
+            window_info=window_info,
+            nll_info=nll_info_dict
         )
 
     print("\n🎉 All plots generated successfully!")

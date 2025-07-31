@@ -20,7 +20,6 @@ from tqdm import tqdm
 
 # === Korrekte Imports für das neue Modell und die Utilities ===
 from ts_benchmark.baselines.duet.models.duet_prob_model import DUETProbModel
-from ts_benchmark.baselines.duet.utils.crps import crps_loss
 from ts_benchmark.baselines.duet.utils.tools import adjust_learning_rate, EarlyStopping
 from ts_benchmark.baselines.utils import forecasting_data_provider, train_val_split
 # === NEUER IMPORT FÜR DIE FENSTER-SUCHE ===
@@ -92,7 +91,7 @@ class TransformerConfig:
             "num_linear_experts": 2,
             "num_univariate_esn_experts": 1,
             "num_multivariate_esn_experts": 1,
-            "k": 2,            # Default, will be overwritten below
+            "k": 2,              # Default, will be overwritten below
 
             # --- ESN Expert Default Parameters ---
             # Univariate ESN
@@ -121,25 +120,18 @@ class TransformerConfig:
             "num_workers": 4,  # <<< HIER HINZUFÜGEN
 
             # --- NEW: Tier 2 Training Strategies ---
-            "loss_function": "crps", # 'crps' or 'gfl'
-            "gfl_gamma": 2.0,        # Focusing parameter for GFL
-            "use_agc": False,        # Use Adaptive Gradient Clipping
-            "agc_lambda": 0.01,      # Clipping factor for AGC
+            "use_agc": False,       # Use Adaptive Gradient Clipping
+            "agc_lambda": 0.01,     # Clipping factor for AGC
 
             # --- Data & Miscellaneous ---
             "moving_avg": 25, "CI": False, "freq": "h",
             "quantiles": [0.1, 0.5, 0.9], # Für die Inferenz
-            "num_bins": 100, "tail_percentile": 0.05,
             "norm_mode": "subtract_median", # Preferred normalization mode
 
             # --- NEW: Projection Head Configuration ---
-            "projection_head_layers": 0,       # Default to 0 for original behavior (single linear layer)
-            "projection_head_dim_factor": 2,   # Hidden dim = in_features / factor
+            "projection_head_layers": 0,      # Default to 0 for original behavior (single linear layer)
+            "projection_head_dim_factor": 2,  # Hidden dim = in_features / factor
             "projection_head_dropout": 0.1,
-
-            # --- NEU: Hybrider Loss GFL + NLL ---
-            # Koeffizient für den NLL-Anteil am Gesamtverlust.
-            "nll_loss_coef": 0.0, # 0.0 deaktiviert den NLL-Anteil
 
             # --- NEW: Interim Validation ---
             "interim_validation_seconds": None, # Default: disabled. Set to e.g. 300 for 5-min validation.
@@ -190,13 +182,9 @@ class DUETProb(ModelBase):
         self.checkpoint_path: Optional[str] = None
         self.interesting_window_indices: Optional[Dict] = None # Für die neuen Plots
         
-        # --- NEU: Cache für statische GFL-Tensoren zur Performance-Optimierung ---
-        self._cached_gfl_bins_lower = None
-        self._cached_gfl_bin_widths = None
-
     @property
     def model_name(self) -> str:
-        return "DUET-Prob-CRPS-v2"
+        return "DUET-Prob-NLL-v1"
 
     @staticmethod
     def required_hyper_params() -> dict:
@@ -208,7 +196,7 @@ class DUETProb(ModelBase):
         basierend auf der aktuellen Konfiguration.
         """
         if not hasattr(self.config, 'enc_in'):
-             raise AttributeError("Model configuration must have 'enc_in' set before building the model. Call _tune_hyper_params() first.")
+            raise AttributeError("Model configuration must have 'enc_in' set before building the model. Call _tune_hyper_params() first.")
         self.model = DUETProbModel(self.config)
 
 
@@ -344,26 +332,26 @@ class DUETProb(ModelBase):
                     # Unpack 9 values, even if most are unused here.
                     denorm_distr, _, _, _, _, _, _, _, _ = self.model(input_data)
 
-                    # === KORREKTUR: CRPS pro Kanal berechnen, nicht den globalen Durchschnitt ===
-                    # crps_loss gibt einen Tensor der Form [B, N_vars, H] zurück.
-                    crps_per_point = crps_loss(denorm_distr, actuals_data.permute(0, 2, 1))
-                        
+                    # === KORREKTUR: NLL pro Kanal berechnen, nicht CRPS ===
+                    # log_prob erwartet [B, H, N_vars], was actuals_data hat.
+                    # Es gibt [B, N_vars, H] zurück.
+                    nll_per_point = -denorm_distr.log_prob(actuals_data)
+                            
                     # Finde den Index des aktuellen Kanals, um den spezifischen Loss zu extrahieren.
                     try:
                         channel_names = list(self.config.channel_bounds.keys())
                         channel_idx = channel_names.index(channel_name)
-                        # Berechne den mittleren CRPS für DIESEN Kanal.
-                        crps_val = crps_per_point[:, channel_idx, :].mean().item()
+                        # Berechne den mittleren NLL für DIESEN Kanal.
+                        nll_val = nll_per_point[:, channel_idx, :].mean().item()
                     except (ValueError, AttributeError):
                         # Fallback, falls der Kanal nicht gefunden wird (sollte nicht passieren).
-                        # In diesem Fall wird der Plot mit dem Gesamt-CRPS beschriftet.
-                        crps_val = crps_per_point.mean().item()
+                        nll_val = nll_per_point.mean().item()
                         
                     # === NEU: DIAGNOSE-CODE ZUR ÜBERPRÜFUNG DER UNSICHERHEIT ===
                     # Berechne die mittlere Standardabweichung der denormalisierten Verteilung.
                     # Dies ist der entscheidende Wert, um die Breite der Vorhersage zu quantifizieren.
                     # Wir nehmen den Durchschnitt über den Horizont und alle Kanäle für eine einzelne Zahl.
-                    avg_stddev = denorm_distr.std.mean().item()
+                    avg_stddev = denorm_distr.stddev.mean().item()
                     # === ENDE DIAGNOSE-CODE ===
 
                     # Plot erstellen
@@ -371,10 +359,10 @@ class DUETProb(ModelBase):
                         history=input_sample_tensor.cpu().numpy(),
                         actuals=actuals_data_tensor.cpu().numpy(),
                         prediction_dist=denorm_distr,
-                        channel_name=channel_name, # NEU
-                        title=f'{channel_name} | {method_name} | CRPS: {crps_val:.2f} | AvgStdDev: {avg_stddev:.2f}'
+                        channel_name=channel_name,
+                        title=f'{channel_name} | {method_name} | NLL: {nll_val:.2f} | AvgStdDev: {avg_stddev:.2f}'
                     )
-                        
+                            
                     # Plot in TensorBoard loggen
                     tag = f"Hard_Windows/{channel_name}/{method_name}"
                     writer.add_figure(tag, fig, global_step=epoch)
@@ -524,11 +512,14 @@ class DUETProb(ModelBase):
                 
                 # Initialisiere Listen zum Sammeln von Metriken über alle Batches einer Epoche
                 # === FIX: Speichere nur Python-Skalare (.item()), keine Tensoren, um Speicherlecks zu verhindern ===
-                epoch_total_losses, epoch_crps_losses, epoch_importance_losses, epoch_normalized_losses = [], [], [], []
-                epoch_nll_losses, epoch_channel_losses = [], {name: [] for name in getattr(config, 'channel_bounds', {}).keys()} # Denormalisiert
-                epoch_normalized_channel_losses = {name: [] for name in getattr(config, 'channel_bounds', {}).keys()} # Normalisiert
+                # === PERFORMANCE-FIX: Entferne die Sammlung von CRPS-Metriken im Trainings-Loop. ===
+                # Die Berechnung ist aufgrund des SciPy-Fallbacks für icdf extrem langsam.
+                # Die CRPS-Validierung am Ende der Epoche ist ausreichend und effizienter.
+                epoch_total_losses, epoch_importance_losses, epoch_normalized_losses = [], [], []
+                # epoch_crps_losses, epoch_channel_losses, epoch_normalized_channel_losses wurden entfernt.
 
-                # === FINALER FIX FÜR SPEICHERLECKS: Laufende Summen für Experten-Metriken ===
+
+                # Laufende Summen für Experten-Metriken
                 # Anstatt Listen von Tensoren zu sammeln, summieren wir die Werte auf.
                 # Initialisiere die Summen-Tensoren auf dem richtigen Gerät.
                 total_experts = config.num_linear_experts + config.num_univariate_esn_experts + config.num_multivariate_esn_experts
@@ -598,65 +589,20 @@ class DUETProb(ModelBase):
                         # um Skalenunabhängigkeit zu gewährleisten.
                         norm_target = denorm_distr.normalize_value(target_horizon).permute(0, 2, 1)
 
-                        # Wende optionales Clipping auf die normalisierten Ziele an.
-                        loss_clip_value = getattr(config, 'loss_target_clip', None)
-                        if loss_clip_value is not None:
-                            norm_target_for_loss = torch.clamp(norm_target, -loss_clip_value, loss_clip_value)
-                        else:
-                            norm_target_for_loss = norm_target
-                        
-                        # === TIER 1 CHANGE: COMPONENT-WISE LOSS ===
-                        # 1. Get tail thresholds and create masks for body and tail points.
-                        #    base_distr's parameters have shape [B, N_vars, H], matching norm_target_for_loss.
-                        lower_thresh = base_distr.lower_threshold
-                        upper_thresh = base_distr.upper_threshold
-                        is_in_tail = (norm_target_for_loss < lower_thresh) | (norm_target_for_loss > upper_thresh)
-                        is_in_body = ~is_in_tail
+                        # === NEU: Einheitliche Loss-Berechnung mit NLL für Student's T ===
+                        # Der Loss wird direkt als Negative Log-Likelihood der normalisierten Daten
+                        # unter der vorhergesagten Verteilung (base_distr) berechnet.
+                        log_probs = base_distr.log_prob(norm_target)
+                        normalized_loss = -log_probs.mean()
 
-                        # 2. Calculate L_body (loss for the distribution's body)
-                        #    This uses the configured loss function (GFL or CRPS) only on non-tail points.
-                        if config.loss_function == 'gfl':
-                            epsilon = 0.1
-                            cdf_upper = base_distr.cdf(norm_target_for_loss + epsilon)
-                            cdf_lower = base_distr.cdf(norm_target_for_loss - epsilon)
-                            pt = torch.clamp(cdf_upper - cdf_lower, min=1e-9)
-                            pt_body = pt[is_in_body]
-                            if pt_body.numel() > 0:
-                                log_loss_part = -torch.log(pt_body)
-                                focal_weight = (1 - pt_body).pow(config.gfl_gamma)
-                                l_body = (focal_weight * log_loss_part).mean()
-                            else:
-                                l_body = torch.tensor(0.0, device=device)
-                        else: # Fallback auf CRPS
-                            crps_per_point = crps_loss(base_distr, norm_target_for_loss)
-                            crps_body = crps_per_point[is_in_body]
-                            if crps_body.numel() > 0:
-                                l_body = crps_body.mean()
-                            else:
-                                l_body = torch.tensor(0.0, device=device)
-
-                        # 3. Calculate L_tail (NLL for tail points)
-                        #    This gives the TailsHead a direct, non-negotiable learning signal.
-                        log_probs = base_distr.log_prob(norm_target_for_loss)
-                        tail_log_probs = log_probs[is_in_tail]
-                        if tail_log_probs.numel() > 0:
-                            l_tail = -tail_log_probs.mean()
-                        else:
-                            l_tail = torch.tensor(0.0, device=device)
-
-                        # 4. Combine losses. We reuse the existing variable names to minimize code changes.
-                        # `normalized_loss` now represents the body loss.
-                        # `nll_loss` now represents the tail loss, weighted by `nll_loss_coef`.
-                        normalized_loss = l_body
-                        nll_loss = l_tail
-
-                        total_loss = normalized_loss + config.loss_coef * loss_importance + config.nll_loss_coef * nll_loss
+                        # Der Gesamtverlust ist jetzt die Summe aus dem NLL-Loss und dem MoE-Loss.
+                        total_loss = normalized_loss + config.loss_coef * loss_importance
 
                         # --- NEU: Skaliere den Loss und führe Backward-Pass aus ---
                         scaled_loss = total_loss / accumulation_steps
                         scaled_loss.backward()
 
-                        # --- NEU: Führe den Optimizer-Schritt nur alle `accumulation_steps` aus ---
+                        # Führe den Optimizer-Schritt nur alle `accumulation_steps` aus
                         if (i + 1) % accumulation_steps == 0:
                             if config.use_agc:
                                 adaptive_clip_grad_(self.model.parameters(), clip_factor=config.agc_lambda)
@@ -665,19 +611,15 @@ class DUETProb(ModelBase):
                             optimizer.step()
                             optimizer.zero_grad()
                         
-                        # === 2. Metriken für das Logging (ohne Gradienten) ===
-                        with torch.no_grad():
-                            denorm_crps_per_point = crps_loss(denorm_distr, target_horizon.permute(0, 2, 1))
-                            denorm_crps_loss = denorm_crps_per_point.mean()
-                            normalized_crps_per_point = crps_loss(base_distr, norm_target)
+                        # === PERFORMANCE-FIX: Die CRPS-Berechnung für das Logging wurde hier entfernt. ===
+                        # Sie wird nur noch in der `validate`-Funktion am Ende der Epoche aufgerufen,
+                        # was den Trainings-Loop massiv beschleunigt.
 
                         # Losses für die Epochen-Statistik sammeln
                         # === FIX: Konvertiere sofort zu .item(), um den Tensor-Speicher freizugeben ===
-                        epoch_total_losses.append(total_loss.item())
-                        epoch_crps_losses.append(denorm_crps_loss.item())
+                        epoch_total_losses.append(total_loss.item())                        
                         epoch_normalized_losses.append(normalized_loss.item())
                         epoch_importance_losses.append(loss_importance.item())
-                        epoch_nll_losses.append(nll_loss.item())
 
                         # === FIX: Addiere zur laufenden Summe hinzu, anstatt Tensoren zu speichern ===
                         if sum_gate_weights_linear is not None and batch_gate_weights_linear.numel() > 0:
@@ -695,14 +637,6 @@ class DUETProb(ModelBase):
                         sum_p_final += p_final.detach().sum(dim=0)
                         num_batches_processed += input_data.size(0) # Addiere die Anzahl der Samples im Batch
                         
-                        # Kanal-spezifische Losses
-                        denorm_loss_per_channel = denorm_crps_per_point.mean(dim=(0, 2))
-                        norm_loss_per_channel = normalized_crps_per_point.mean(dim=(0, 2))
-                        channel_names = self.model.module.channel_names if hasattr(self.model, 'module') else self.model.channel_names
-                        for idx, name in enumerate(channel_names):
-                            epoch_channel_losses[name].append(denorm_loss_per_channel[idx].item())
-                            epoch_normalized_channel_losses[name].append(norm_loss_per_channel[idx].item())
-                        
                         # --- KORREKTUR: Dem Profiler mitteilen, dass der Step beendet ist ---
                         if prof:
                             prof.step()
@@ -717,7 +651,7 @@ class DUETProb(ModelBase):
                         if (i + 1) % config.tqdm_update_freq == 0 or (i + 1) == len(train_data_loader):
                             avg_epoch_loss = epoch_total_loss_sum / (i + 1)
                             avg_epoch_norm_loss = epoch_norm_loss_sum / (i + 1)
-                            epoch_loop.set_postfix(loss=f"{avg_epoch_loss:.4f}", norm_loss=f"{avg_epoch_norm_loss:.4f}")
+                            epoch_loop.set_postfix(loss=f"{avg_epoch_loss:.4f}", nll=f"{avg_epoch_norm_loss:.4f}")
 
                         # === KORREKTUR: Verallgemeinerte Speicherüberwachung für CUDA und MPS ===
                         current_time = time.time()
@@ -752,22 +686,15 @@ class DUETProb(ModelBase):
                 # Die tqdm-Schleife wird am Ende der Epoche automatisch geschlossen und aufgeräumt.
                 # === FIX: Berechne den Mittelwert aus der Liste von Python-Floats ===
                 avg_train_total_loss = np.mean(epoch_total_losses)
-                avg_train_crps_loss = np.mean(epoch_crps_losses)
                 avg_train_norm_loss = np.mean(epoch_normalized_losses)
                 avg_train_importance_loss = np.mean(epoch_importance_losses)
-                avg_train_nll_loss = np.mean(epoch_nll_losses)
 
                 writer.add_scalar("Loss/Train_Total", avg_train_total_loss, epoch)
-                writer.add_scalar("Loss_Normalized/Train_Loss", avg_train_norm_loss, epoch)
-                writer.add_scalar("Loss_Denormalized/Train_CRPS", avg_train_crps_loss, epoch)
+                writer.add_scalar("Loss_Normalized/Train_NLL", avg_train_norm_loss, epoch)
                 writer.add_scalar("Loss/Train_Importance", avg_train_importance_loss, epoch)
-                if config.nll_loss_coef > 0:
-                    writer.add_scalar("Loss/Train_NLL", avg_train_nll_loss, epoch)
                 
-                for name, losses in epoch_channel_losses.items():
-                    writer.add_scalar(f"Loss_per_Channel/Train_{name}", np.mean(losses), epoch)
-                for name, losses in epoch_normalized_channel_losses.items():
-                    writer.add_scalar(f"Loss_Normalized_per_Channel/Train_{name}", np.mean(losses), epoch)
+                # === PERFORMANCE-FIX: Logging für Trainings-CRPS entfernt. ===
+                # Die relevanten Validierungs-CRPS-Werte werden weiterhin geloggt.
 
                 # --- Mittelung der Experten-Metriken über die Epoche ---
                 # === FIX: Berechne den Durchschnitt aus den laufenden Summen ===
@@ -813,26 +740,25 @@ class DUETProb(ModelBase):
                     avg_p_learned = sum_p_learned / num_batches_processed
                     avg_p_final = sum_p_final / num_batches_processed
 
-                # === NEU: Extrahiere Statistiken der letzten Verteilung für das Logging ===
+                # === NEU: Extrahiere Statistiken der Student-T-Verteilung für das Logging ===
                 dist_stats = {}
                 with torch.no_grad():
-                    # base_distr ist die letzte berechnete Verteilung aus der Trainingsschleife
-                    if 'base_distr' in locals():
-                        dist_stats['xi_mean'] = base_distr.lower_gp_xi.mean().item()
-                        dist_stats['xi_std'] = base_distr.lower_gp_xi.std().item()
-                        dist_stats['beta_mean'] = base_distr.lower_gp_beta.mean().item()
-                        dist_stats['beta_std'] = base_distr.lower_gp_beta.std().item()
-                        
-                        bin_probs = torch.softmax(base_distr.logits, dim=-1)
-                        entropy = -torch.sum(bin_probs * torch.log(bin_probs + 1e-9), dim=-1).mean()
-                        dist_stats['logits_entropy'] = entropy.item()
-                        
+                    # base_distr ist die letzte berechnete Student-T-Verteilung
+                    if 'base_distr' in locals() and hasattr(base_distr, 'df'):
+                        dist_stats['df_mean'] = base_distr.df.mean().item()
+                        dist_stats['df_std'] = base_distr.df.std().item()
+                        dist_stats['loc_mean'] = base_distr.loc.mean().item()
+                        dist_stats['loc_std'] = base_distr.loc.std().item()
+                        dist_stats['scale_mean'] = base_distr.scale.mean().item()
+                        dist_stats['scale_std'] = base_distr.scale.std().item()
+
                         # Logge die extrahierten Statistiken nach TensorBoard
-                        writer.add_scalar("Distribution_Stats/xi_mean", dist_stats['xi_mean'], epoch)
-                        writer.add_scalar("Distribution_Stats/xi_std", dist_stats['xi_std'], epoch)
-                        writer.add_scalar("Distribution_Stats/beta_mean", dist_stats['beta_mean'], epoch)
-                        writer.add_scalar("Distribution_Stats/beta_std", dist_stats['beta_std'], epoch)
-                        writer.add_scalar("Distribution_Stats/logits_entropy", dist_stats['logits_entropy'], epoch)
+                        writer.add_scalar("Distribution_Stats/df_mean", dist_stats['df_mean'], epoch)
+                        writer.add_scalar("Distribution_Stats/df_std", dist_stats['df_std'], epoch)
+                        writer.add_scalar("Distribution_Stats/loc_mean", dist_stats['loc_mean'], epoch)
+                        writer.add_scalar("Distribution_Stats/loc_std", dist_stats['loc_std'], epoch)
+                        writer.add_scalar("Distribution_Stats/scale_mean", dist_stats['scale_mean'], epoch)
+                        writer.add_scalar("Distribution_Stats/scale_std", dist_stats['scale_std'], epoch)
 
                 metric_for_optimization = float('nan') # Fallback, falls keine Validierung stattfindet
 
@@ -878,17 +804,17 @@ class DUETProb(ModelBase):
                     cvar_metric_for_opt = calculate_cvar(losses_for_optimization, self.config.cvar_alpha)
 
                     # --- Logge die globalen Metriken (über alle Kanäle gemittelt) zur Beobachtung ---
-                    overall_avg_crps = np.mean(all_window_losses_denorm)
-                    overall_cvar_crps = calculate_cvar(all_window_losses_denorm.mean(axis=1), self.config.cvar_alpha)
-                    writer.add_scalar("Loss/Validation_Overall_Avg_CRPS", overall_avg_crps, epoch)
-                    writer.add_scalar("Loss/Validation_Overall_CVaR_CRPS", overall_cvar_crps, epoch)
-                    writer.add_scalar("Loss_Normalized/Validation_Avg_CRPS", np.mean(all_window_losses_norm), epoch)
+                    overall_avg_nll = np.mean(all_window_losses_denorm)
+                    overall_cvar_nll = calculate_cvar(all_window_losses_denorm.mean(axis=1), self.config.cvar_alpha)
+                    writer.add_scalar("Loss/Validation_Overall_Avg_NLL", overall_avg_nll, epoch)
+                    writer.add_scalar("Loss/Validation_Overall_CVaR_NLL", overall_cvar_nll, epoch)
+                    writer.add_scalar("Loss_Normalized/Validation_Avg_NLL", np.mean(all_window_losses_norm), epoch)
 
                     # --- NEU: Logge die spezifischen Metriken des Zielkanals, falls vorhanden ---
                     if target_channel and target_channel in channel_names:
                         # In diesem Fall sind die "Optimierungsmetriken" genau die des Zielkanals.
-                        writer.add_scalar(f"Loss_Target_{target_channel}/Validation_Avg_CRPS", avg_metric_for_opt, epoch)
-                        writer.add_scalar(f"Loss_Target_{target_channel}/Validation_CVaR_CRPS", cvar_metric_for_opt, epoch)
+                        writer.add_scalar(f"Loss_Target_{target_channel}/Validation_Avg_NLL", avg_metric_for_opt, epoch)
+                        writer.add_scalar(f"Loss_Target_{target_channel}/Validation_CVaR_NLL", cvar_metric_for_opt, epoch)
 
 
                     # 2. Wähle die Metrik für die Optimierung basierend auf der Konfiguration.
@@ -897,13 +823,13 @@ class DUETProb(ModelBase):
                         metric_name_for_logging = f"CVaR@{self.config.cvar_alpha:.2f}"
                     else:  # Standard ist der Durchschnitts-CRPS
                         metric_for_optimization = avg_metric_for_opt
-                        metric_name_for_logging = "Avg CRPS"
+                        metric_name_for_logging = "Avg NLL"
 
                     # Logge die tatsächlich verwendete Optimierungsmetrik
                     writer.add_scalar(f"Loss_Optimized/Validation_Metric", metric_for_optimization, epoch)
 
                     # 3. Gib die Metriken in der Konsole aus und hebe die aktive hervor.
-                    log_msg = (f"Epoch {epoch + 1} Validation | Overall Avg CRPS: {overall_avg_crps:.6f} | "
+                    log_msg = (f"Epoch {epoch + 1} Validation | Overall Avg NLL: {overall_avg_nll:.6f} | "
                                f"Optimierungs-Metrik ({optimization_target_name_for_log}): {metric_name_for_logging} = {metric_for_optimization:.6f} --> Für Early Stopping & Pruning verwendet.")
                     tqdm.write(log_msg)
 
@@ -963,8 +889,8 @@ class DUETProb(ModelBase):
                 
                 # Füge einen harten Timeout hinzu, um sicherzustellen, dass kein Trial die max_training_time überschreitet.
                 if (time.time() - start_time) > max_training_time:
-                        print(f"Trial timed out after {(time.time() - start_time):.2f}s (max: {max_training_time}s).")
-                        break # Beendet die Epochen-Schleife
+                    print(f"Trial timed out after {(time.time() - start_time):.2f}s (max: {max_training_time}s).")
+                    break # Beendet die Epochen-Schleife
                 
                 writer.add_scalar("Misc/Learning_Rate", optimizer.param_groups[0]['lr'], epoch)
                 # NEUER FIX: Erzwinge das Schreiben der TensorBoard-Logs auf die Festplatte am Ende jeder Epoche.
@@ -977,15 +903,15 @@ class DUETProb(ModelBase):
                     "duration_s": epoch_duration,
                     "lr": optimizer.param_groups[0]['lr'],
                     "train_loss_total": avg_train_total_loss,
-                    "train_loss_norm": avg_train_norm_loss,
-                    "train_loss_nll": avg_train_nll_loss,
+                    "train_loss_norm": avg_train_norm_loss, # This is now the NLL
                     "train_loss_importance": avg_train_importance_loss,
                     "validation_metric": metric_for_optimization,
-                    "xi_mean": dist_stats.get('xi_mean', float('nan')),
-                    "xi_std": dist_stats.get('xi_std', float('nan')),
-                    "beta_mean": dist_stats.get('beta_mean', float('nan')),
-                    "beta_std": dist_stats.get('beta_std', float('nan')),
-                    "logits_entropy": dist_stats.get('logits_entropy', float('nan')),
+                    "df_mean": dist_stats.get('df_mean', float('nan')),
+                    "df_std": dist_stats.get('df_std', float('nan')),
+                    "loc_mean": dist_stats.get('loc_mean', float('nan')),
+                    "loc_std": dist_stats.get('loc_std', float('nan')),
+                    "scale_mean": dist_stats.get('scale_mean', float('nan')),
+                    "scale_std": dist_stats.get('scale_std', float('nan')),
                 }
                 self._log_epoch_summary_to_file(summary_metrics)
                 # === ENDE NEUES LOGGING ===
@@ -1022,20 +948,19 @@ class DUETProb(ModelBase):
         summary_str = f"""
 ============================== EPOCH {metrics['epoch']:<4} COMPLETE ==============================
 --- Performance ---
-Duration          : {metrics['duration_s']:.2f} s
-Learning Rate     : {metrics['lr']:.2e}
-Train Loss (Total): {metrics['train_loss_total']:.6f}
-Validation Metric : {metrics['validation_metric']:.6f}  (Lower is better)
+Duration                : {metrics['duration_s']:.2f} s
+Learning Rate           : {metrics['lr']:.2e}
+Train Loss (Total)      : {metrics['train_loss_total']:.6f}
+Validation Metric       : {metrics['validation_metric']:.6f}  (Lower is better)
 
 --- Loss Components (Train) ---
-Normalized Loss   : {metrics['train_loss_norm']:.6f}  (CRPS or GFL on normalized data)
-NLL Loss          : {metrics['train_loss_nll']:.6f}  (Signal for tails)
-Importance Loss   : {metrics['train_loss_importance']:.6f}  (MoE balance)
+Normalized NLL          : {metrics['train_loss_norm']:.6f}  (Main objective)
+Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
 
---- Distribution Stability (Train) ---
-Tail Shape (xi)   : Mean = {metrics['xi_mean']:.4f}, Std = {metrics['xi_std']:.4f}
-Tail Scale (beta) : Mean = {metrics['beta_mean']:.4f}, Std = {metrics['beta_std']:.4f}
-Bin Entropy       : {metrics['logits_entropy']:.4f} (Higher = more uncertain)
+--- Distribution Stability (Train - Student's T) ---
+Degrees of Freedom (df) : Mean = {metrics['df_mean']:.4f}, Std = {metrics['df_std']:.4f}
+Location (loc)          : Mean = {metrics['loc_mean']:.4f}, Std = {metrics['loc_std']:.4f}
+Scale (scale)           : Mean = {metrics['scale_mean']:.4f}, Std = {metrics['scale_std']:.4f}
 """
         with open(log_file_path, 'a') as f:
             f.write(summary_str)
@@ -1063,24 +988,24 @@ Bin Entropy       : {metrics['logits_entropy']:.4f} (Higher = more uncertain)
                 denorm_distr, base_distr, _, _, _, _, _, _, _ = self.model(input_data)
                 
                 # Berechne den denormalisierten Loss für EarlyStopping/Optuna
-                # crps_loss erwartet target in [B, N_vars, H]
-                # Wir berechnen den mittleren CRPS pro Kanal pro Sample im Batch -> [B, N_vars]
-                denorm_loss_per_sample = crps_loss(denorm_distr, target_horizon.permute(0, 2, 1)).mean(dim=2)
+                # Wir berechnen den NLL. log_prob erwartet [B, H, N_vars], was target_horizon hat.
+                # Wir mitteln über den Horizont, um einen Loss pro Kanal pro Sample zu erhalten -> [B, N_vars]
+                denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
                 all_denorm_losses.append(denorm_loss_per_sample.cpu().numpy())
 
                 # Berechne den normalisierten Loss für das Logging
                 norm_target = denorm_distr.normalize_value(target_horizon).permute(0, 2, 1)
-                norm_loss_per_sample = crps_loss(base_distr, norm_target).mean(dim=2)
+                norm_loss_per_sample = -base_distr.log_prob(norm_target).mean(dim=2)
                 all_norm_losses.append(norm_loss_per_sample.cpu().numpy())
 
                 # Update tqdm bar with the running mean of all collected losses so far
                 if all_denorm_losses:
                     # Berechne den Gesamt-Durchschnitt über alle Fenster und Kanäle
-                    running_mean_denorm = np.mean(np.concatenate(all_denorm_losses)) 
+                    running_mean_denorm = np.mean(np.concatenate(all_denorm_losses))
                     running_mean_norm = np.mean(np.concatenate(all_norm_losses))
                     validation_loop.set_postfix(
-                        denorm_crps=running_mean_denorm,
-                        norm_crps=running_mean_norm
+                        denorm_nll=running_mean_denorm,
+                        norm_nll=running_mean_norm
                     )
 
         self.model.train()
@@ -1134,7 +1059,7 @@ Bin Entropy       : {metrics['logits_entropy']:.4f} (Higher = more uncertain)
         return self
 
     def _create_window_plot(self, history, actuals, prediction_dist, channel_name, title):
-        """Erstellt eine Matplotlib-Figur für ein einzelnes Fenster, inkl. Tail-Parameter-Analyse."""
+        """Erstellt eine Matplotlib-Figur für ein einzelnes Fenster."""
         fig, ax = plt.subplots(figsize=(12, 6))
 
         # Finde den Index des zu plottenden Kanals
@@ -1143,8 +1068,7 @@ Bin Entropy       : {metrics['logits_entropy']:.4f} (Higher = more uncertain)
             model_ref = self.model.module if hasattr(self.model, 'module') else self.model
             channel_idx = model_ref.channel_names.index(channel_name)
         except (ValueError, AttributeError, IndexError):
-             # Fallback, wenn die Namen nicht übereinstimmen
-            # KORREKTUR: Tippfehler 'channel' zu 'channel_idx'
+            # Fallback, wenn die Namen nicht übereinstimmen
             channel_idx = 0
 
         # Daten vorbereiten
@@ -1167,19 +1091,13 @@ Bin Entropy       : {metrics['logits_entropy']:.4f} (Higher = more uncertain)
         device = prediction_dist.mean.device
         q_tensor = torch.tensor(quantiles, device=device, dtype=torch.float32)
 
-        # --- DATEN VOM MODELL HOLEN (haben den langen Horizont, z.B. 96) ---
+        # --- DATEN VOM MODELL HOLEN ---
         # Shape ist [Anzahl_Variablen, H_pred, Anzahl_Quantile]
         quantile_preds_full = prediction_dist.icdf(q_tensor).squeeze(0).cpu().numpy()
-        base_dist = prediction_dist.base_dist
-        # Shape ist [H_pred]
-        lower_tail_xi_full = base_dist.lower_gp_xi.squeeze(0)[channel_idx, :].cpu().numpy()
-        upper_tail_xi_full = base_dist.upper_gp_xi.squeeze(0)[channel_idx, :].cpu().numpy()
-
-        # --- ENDGÜLTIGE KORREKTUR: An der korrekten Dimension zuschneiden ---
+        
+        # --- KORREKTUR: An der korrekten Dimension zuschneiden ---
         # Schneide an Dimension 1 (Horizont) statt an Dimension 0 (Variablen)
         quantile_preds_sliced = quantile_preds_full[:, :horizon_len, :]
-        lower_tail_xi = lower_tail_xi_full[:horizon_len]
-        upper_tail_xi = upper_tail_xi_full[:horizon_len]
 
         # --- Weiterverarbeitung für den Plot ---
         # Wähle den relevanten Kanal aus dem gesliceten Tensor aus.
@@ -1223,39 +1141,11 @@ Bin Entropy       : {metrics['logits_entropy']:.4f} (Higher = more uncertain)
         # Median Forecast
         ax.plot(forecast_x, preds_y[:, median_idx], label="Median Forecast", color="blue", linestyle='--', zorder=11)
         
-        # --- NEU: Zweite Y-Achse für die Tail-Parameter (xi) ---
-        ax2 = ax.twinx()
-        
-        # Plot der xi-Parameter
-        ax2.plot(forecast_x, upper_tail_xi, label='Upper Tail ξ (xi)', color='darkorange', linestyle='none', marker='^', markersize=4, zorder=20)
-        ax2.plot(forecast_x, lower_tail_xi, label='Lower Tail ξ (xi)', color='purple', linestyle='none', marker='v', markersize=4, zorder=20)
-        
-        # Bereiche für die Tail-Typen hervorheben
-        # Finde einen sinnvollen y-Bereich für die Achse
-        min_xi = min(np.min(lower_tail_xi), np.min(upper_tail_xi))
-        max_xi = max(np.max(lower_tail_xi), np.max(upper_tail_xi))
-        plot_min = min(-0.5, min_xi - 0.1)
-        plot_max = max(0.5, max_xi + 0.1)
-        ax2.set_ylim(plot_min, plot_max)
-
-        # Fréchet-Domain (gefährlich)
-        # Weibull-Domain (harmlos)
-        # Gumbel-Schwelle
-        ax2.axhline(0, color='black', linestyle='--', linewidth=1)
-
-        ax2.set_ylabel("Tail Shape Parameter (ξ)", color="darkorange")
-        ax2.tick_params(axis='y', labelcolor="darkorange")
-        ax2.grid(False) # Deaktiviere das Grid für die zweite Achse, um es sauber zu halten
-
         # Layout
         ax.set_title(title)
         ax.set_ylabel("Time Series Value")
         ax.grid(True, which='both', linestyle='--', linewidth=0.5)
-        
-        # Kombinierte Legende für beide Achsen
-        lines, labels = ax.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax2.legend(lines + lines2, labels + labels2, loc='upper left')
+        ax.legend(loc='upper left')
 
         plt.tight_layout()
         
