@@ -9,6 +9,7 @@ from pathlib import Path
 from ts_benchmark.baselines.duet.models.duet_prob_model import DUETProbModel
 from ts_benchmark.baselines.duet.duet_prob import TransformerConfig
 
+
 # --- Feste Konfiguration ---
 # Die Spaltenreihenfolge muss exakt der beim Training entsprechen!
 SERIES_ORDER = ['wassertemp', 'airtemp_96', 'pressure_96']
@@ -83,15 +84,18 @@ def run_forecast(checkpoint_path: Path, data_path: Path, output_path: Path):
     freq = pd.infer_freq(df_wide.index)
     forecast_index = pd.date_range(start=last_timestamp + pd.to_timedelta(1, unit=freq if freq else 'H'), periods=config.horizon, freq=freq)
     
-    # Erstelle einen Multi-Index für die Spalten (Variable, Quantil)
-    header = pd.MultiIndex.from_product([SERIES_ORDER, QUANTILES_TO_PREDICT], names=['variable', 'quantile'])
+    # Erstelle einen hierarchischen Multi-Index für die Spalten (Variable, Quantil)
+    multi_header = pd.MultiIndex.from_product([SERIES_ORDER, QUANTILES_TO_PREDICT], names=['variable', 'quantile'])
     
     # Das Array hat die Form [Horizon, Num_Vars, Num_Quantiles]. Wir müssen es umformen.
     # Reshape zu [Horizon, Num_Vars * Num_Quantiles]
     reshaped_preds = prediction_array.reshape(config.horizon, -1)
     
+    # Wandle den Multi-Index in einen einzelnen, flachen Header um (z.B. 'wassertemp_q0.5')
+    flat_header = [f"{var}_q{q}" for var, q in multi_header]
+    
     # Erstelle den finalen DataFrame
-    forecast_df = pd.DataFrame(reshaped_preds, index=forecast_index, columns=header)
+    forecast_df = pd.DataFrame(reshaped_preds, index=forecast_index, columns=flat_header)
     
     forecast_df.to_csv(output_path)
     print(f"🎉 Forecast successfully saved to {output_path.resolve()}")
