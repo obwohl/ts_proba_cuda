@@ -130,35 +130,46 @@ def plot_shap_over_time(shap_values, channel_names, horizon, target_channel, out
     plt.close(fig)
     print(f"✅ Plot gespeichert unter: {output_filename}")
 
-def plot_instance_vs_background(instance_data, background_data, channel_names, target_channel_idx, seq_len, output_filename):
+def plot_instance_vs_background(instance_data, background_data, prediction_for_instance, prediction_for_background, channel_names, target_channel_idx, seq_len, horizon, output_filename):
     """
-    Erstellt einen Vergleichsplot zwischen der zu erklärenden Instanz und dem
-    nächstgelegenen Hintergrund-Zentroiden für den Zielkanal.
+    Erstellt einen erweiterten Vergleichsplot: Input und Vorhersage für die
+    tatsächliche Instanz vs. den nächstgelegenen Hintergrund-Zentroiden.
 
     Args:
         instance_data (np.ndarray): Die zu erklärende Instanz mit Shape (1, seq_len, n_features).
         background_data (np.ndarray): Der nächstgelegene Hintergrund-Zentroid mit Shape (seq_len, n_features).
+        prediction_for_instance (np.ndarray): Vorhersage für die Instanz, Shape (1, n_features, horizon).
+        prediction_for_background (np.ndarray): Vorhersage für den Hintergrund, Shape (1, n_features, horizon).
         channel_names (list): Liste der Kanalnamen.
         target_channel_idx (int): Index des Zielkanals.
         seq_len (int): Länge der Sequenz.
+        horizon (int): Länge der Vorhersage-Sequenz.
         output_filename (str): Dateiname für den zu speichernden Plot.
     """
-    fig, ax = plt.subplots(figsize=(15, 7))
+    fig, ax = plt.subplots(figsize=(20, 7))
     
     target_channel_name = channel_names[target_channel_idx]
     
-    # Extrahiere die Zeitreihen für den Zielkanal
+    # --- 1. Daten extrahieren ---
+    # Inputs
     instance_series = instance_data[0, :, target_channel_idx]
     background_series = background_data[:, target_channel_idx]
+    # Predictions
+    instance_prediction_series = prediction_for_instance[0, target_channel_idx, :]
+    background_prediction_series = prediction_for_background[0, target_channel_idx, :]
     
-    x_axis = np.arange(seq_len)
+    # --- 2. Zeitachsen definieren ---
+    x_axis_input = np.arange(seq_len)
+    x_axis_prediction = np.arange(seq_len, seq_len + horizon)
     
-    # Plotte beide Zeitreihen
-    ax.plot(x_axis, instance_series, label=f"Tatsächlicher Input für '{target_channel_name}'", color="#4E79A7", linewidth=2)
-    ax.plot(x_axis, background_series, label=f"Nächstgelegener Hintergrund (Zentroid) für '{target_channel_name}'", color="#F28E2B", linestyle='--', linewidth=2)
-    
-    ax.set_title(f"Vergleich: Tatsächlicher Input vs. SHAP-Hintergrund\nfür Kanal '{target_channel_name}'")
-    ax.set_xlabel("Zeitschritt im Input-Fenster")
+    # --- 3. Plotten ---
+    ax.plot(x_axis_input, instance_series, label=f"Tatsächlicher Input ('{target_channel_name}')", color="#4E79A7", linewidth=2)
+    ax.plot(x_axis_input, background_series, label=f"Hintergrund-Input (Zentroid)", color="#F28E2B", linestyle='--', linewidth=2)
+    ax.plot(x_axis_prediction, instance_prediction_series, label=f"Tatsächliche Vorhersage", color="#4E79A7", linewidth=2, marker='.')
+    ax.plot(x_axis_prediction, background_prediction_series, label=f"Hintergrund-Vorhersage (Baseline)", color="#F28E2B", linestyle='--', linewidth=2, marker='.')
+    ax.axvline(x=seq_len - 0.5, color='black', linestyle=':', linewidth=1.5, label='Forecast Start')
+    ax.set_title(f"Vergleich: Input & Vorhersage (Instanz vs. SHAP-Hintergrund)\nfür Kanal '{target_channel_name}'")
+    ax.set_xlabel("Zeitschritt (Input-Fenster | Vorhersage-Horizont)")
     ax.set_ylabel("Wert")
     ax.legend()
     
@@ -166,6 +177,33 @@ def plot_instance_vs_background(instance_data, background_data, channel_names, t
     plt.savefig(output_filename)
     plt.close(fig)
     print(f"✅ Vergleichsplot gespeichert unter: {output_filename}")
+
+def plot_shap_additivity_check(prediction_for_instance_target, shap_base_value, shap_values_sum, horizon, output_filename):
+    """
+    Erstellt einen Plot, um die Additivitätseigenschaft von SHAP zu verifizieren.
+    Vergleicht die Lücke zwischen Vorhersage und Baseline mit der Summe der SHAP-Werte.
+    """
+    fig, ax = plt.subplots(figsize=(15, 7))
+    
+    # Berechne die Lücke basierend auf der übergebenen Baseline
+    prediction_gap = prediction_for_instance_target - shap_base_value
+
+    x_axis = np.arange(horizon)
+    
+    ax.plot(x_axis, prediction_gap, label='Lücke (Vorhersage - Baseline)', color="#4E79A7", linewidth=2.5)
+    ax.plot(x_axis, shap_values_sum, label='Summe aller SHAP-Werte', color="#F28E2B", linestyle='--', linewidth=2.5)
+    
+    difference = np.mean(np.abs(prediction_for_instance_target - (shap_base_value + shap_values_sum)))
+    
+    ax.set_title(f"SHAP Additivitäts-Check\n(Mittlere absolute Abweichung: {difference:.4g})")
+    ax.set_xlabel("Zeitschritt im Vorhersage-Horizont")
+    ax.set_ylabel("Wert")
+    ax.legend()
+    
+    plt.tight_layout()
+    plt.savefig(output_filename)
+    plt.close(fig)
+    print(f"✅ Additivitäts-Check Plot gespeichert unter: {output_filename}")
 
 def main():
     """
@@ -273,25 +311,37 @@ def main():
         background_data = kmeans.cluster_centers_.reshape(N_BACKGROUND_SAMPLES, seq_len, n_features).astype(np.float32)
         print(f"  - Hintergrunddaten mit Shape {background_data.shape} erstellt.")
 
-        # --- NEU: Finde den nächstgelegenen Zentroiden und plotte den Vergleich ---
+        # --- NEU: Finde den nächstgelegenen Zentroiden und berechne Vorhersagen für den Plot ---
         print("\nSuche den nächstgelegenen Hintergrund-Zentroiden für die Visualisierung...")
-        # Forme die Daten für die Abstandsberechnung um
         instance_flat = instance_to_explain.reshape(1, -1)
         background_flat = background_data.reshape(N_BACKGROUND_SAMPLES, -1)
-        
-        # Berechne die euklidischen Abstände
         distances = np.linalg.norm(background_flat - instance_flat, axis=1)
         closest_centroid_idx = np.argmin(distances)
         closest_centroid = background_data[closest_centroid_idx]
         print(f"  - Zentroid #{closest_centroid_idx} ist der nächstgelegene.")
         
-        # Erstelle den Vergleichsplot
+        print("\nBerechne Vorhersagen für den Vergleichsplot...")
+        with torch.no_grad():
+            # 1. Vorhersage für die tatsächliche Instanz
+            instance_tensor = torch.from_numpy(instance_to_explain).to(device)
+            dist_instance, *_ = model(instance_tensor)
+            prediction_for_instance = dist_instance.loc.cpu().numpy()
+            # 2. Vorhersage für den nächstgelegenen Hintergrund-Zentroid
+            closest_centroid_batch = closest_centroid[np.newaxis, ...].astype(np.float32)
+            background_tensor = torch.from_numpy(closest_centroid_batch).to(device)
+            dist_background, *_ = model(background_tensor)
+            prediction_for_background = dist_background.loc.cpu().numpy()
+        print("  - Vorhersagen berechnet.")
+        
         plot_instance_vs_background(
             instance_data=instance_to_explain,
             background_data=closest_centroid,
+            prediction_for_instance=prediction_for_instance,
+            prediction_for_background=prediction_for_background,
             channel_names=channel_names,
             target_channel_idx=target_channel_idx,
             seq_len=seq_len,
+            horizon=horizon,
             output_filename="shap_instance_vs_background.png"
         )
 
@@ -429,6 +479,32 @@ def main():
         target_channel=TARGET_CHANNEL,
         output_filename="shap_relative_importance_over_time.png",
         plot_absolute=False
+    )
+
+    # --- NEU: Plot 4: Additivitäts-Check ---
+    print("\nÜberprüfe die Additivitätseigenschaft von SHAP...")
+    # 1. Hole die tatsächliche Vorhersage für die zu erklärende Instanz
+    # prediction_for_instance hat die Form (1, n_features, horizon)
+    prediction_for_instance_target = prediction_for_instance[0, target_channel_idx, :] # Shape: (horizon,)
+
+    # 2. Berechne die Summe der SHAP-Werte über alle Features für jeden Zeitschritt
+    # shap_values_array hat die Form (n_features, horizon)
+    shap_values_sum = np.sum(shap_values_array, axis=0) # Shape: (horizon,)
+
+    # 3. Hole die von SHAP intern berechnete Baseline.
+    # `explainer.expected_value` ist ein Array mit der Länge des Horizonts.
+    # Dies ist der y-Achsenabschnitt des von SHAP angenäherten Modells.
+    shap_internal_baseline = explainer.expected_value
+    print(f"  - SHAP interne Baseline (explainer.expected_value) hat die Form: {shap_internal_baseline.shape}")
+
+    # 4. Erstelle den Verifikations-Plot mit der internen Baseline von SHAP.
+    # Die Lücke sollte jetzt fast Null sein.
+    plot_shap_additivity_check(
+        prediction_for_instance_target=prediction_for_instance_target,
+        shap_base_value=shap_internal_baseline,
+        shap_values_sum=shap_values_sum,
+        horizon=horizon,
+        output_filename="shap_additivity_check.png"
     )
 
 if __name__ == "__main__":
