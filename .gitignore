@@ -22,8 +22,5 @@ __pycache__/
 version.txt
 metadata.json
 
-#optuna
-*study.db
-
 inference_checkpoints/
 *.png
