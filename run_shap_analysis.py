@@ -205,6 +205,314 @@ def plot_shap_additivity_check(prediction_for_instance_target, shap_base_value, 
     plt.close(fig)
     print(f"✅ Additivitäts-Check Plot gespeichert unter: {output_filename}")
 
+def plot_shap_waterfall(actual_prediction, base_value, shap_values, channel_names, horizon, output_filename):
+    """
+    Erstellt einen "Wasserfall"-Plot, der zeigt, wie die SHAP-Werte die Vorhersage
+    von der Baseline zur tatsächlichen Vorhersage "schieben".
+
+    Args:
+        actual_prediction (np.ndarray): Die tatsächliche Vorhersage (shape: [horizon,]).
+        base_value (np.ndarray): Die Basis-Vorhersage von SHAP (shape: [horizon,]).
+        shap_values (np.ndarray): Die SHAP-Werte (shape: [num_features, horizon]).
+        channel_names (list): Liste der Kanalnamen.
+        horizon (int): Länge des Vorhersagehorizonts.
+        output_filename (str): Dateiname für den zu speichernden Plot.
+    """
+    fig, ax = plt.subplots(figsize=(20, 10))
+    x_axis = np.arange(horizon)
+
+    # Starte den "Wasserfall" bei der Basis-Vorhersage
+    current_bottom = base_value.copy()
+
+    # Iteriere durch jedes Feature und füge seinen Beitrag als gefüllte Fläche hinzu
+    for i in range(len(channel_names)):
+        values = shap_values[i, :]
+        ax.fill_between(x_axis, current_bottom, current_bottom + values, label=f'{channel_names[i]} (Beitrag)', step='post')
+        current_bottom += values
+
+    # Plotte die Start- und Endpunkte zur Verdeutlichung
+    ax.plot(x_axis, base_value, color='black', linestyle='--', linewidth=2, label='SHAP Baseline (expected_value)', zorder=10)
+    ax.plot(x_axis, actual_prediction, color='red', linestyle='-', linewidth=2.5, label='Tatsächliche Vorhersage', zorder=10)
+
+    ax.set_title("SHAP Erklärung: Wie die Feature-Beiträge die Vorhersage formen", fontsize=16)
+    ax.set_xlabel("Zeitschritt im Vorhersage-Horizont")
+    ax.set_ylabel("Vorhergesagter Wert")
+    ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+    fig.tight_layout(rect=[0, 0, 0.85, 1])
+    plt.savefig(output_filename)
+    plt.close(fig)
+    print(f"✅ SHAP-Wasserfall-Plot gespeichert unter: {output_filename}")
+
+def plot_shap_force_over_time(actual_prediction, base_value, shap_values, channel_names, horizon, output_filename):
+    """
+    Erstellt einen "Force Plot" über den Zeithorizont, der positive und negative
+    SHAP-Beiträge getrennt voneinander visualisiert.
+
+    Args:
+        actual_prediction (np.ndarray): Die tatsächliche Vorhersage (shape: [horizon,]).
+        base_value (np.ndarray): Die Basis-Vorhersage von SHAP (shape: [horizon,]).
+        shap_values (np.ndarray): Die SHAP-Werte (shape: [num_features, horizon]).
+        channel_names (list): Liste der Kanalnamen.
+        horizon (int): Länge des Vorhersagehorizonts.
+        output_filename (str): Dateiname für den zu speichernden Plot.
+    """
+    fig, ax = plt.subplots(figsize=(20, 10))
+    x_axis = np.arange(horizon)
+
+    # Initialisiere die "Böden" für positive und negative Stapel bei der Baseline
+    bottom_positive = base_value.copy()
+    bottom_negative = base_value.copy()
+
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+    for i in range(len(channel_names)):
+        values = shap_values[i, :]
+        color = colors[i % len(colors)]
+        # Positive Beiträge werden auf den positiven Stapel addiert
+        ax.fill_between(x_axis, bottom_positive, bottom_positive + np.maximum(0, values), color=color, step='post', label=f'{channel_names[i]} (Beitrag)')
+        bottom_positive += np.maximum(0, values)
+        # Negative Beiträge werden vom negativen Stapel abgezogen
+        ax.fill_between(x_axis, bottom_negative, bottom_negative + np.minimum(0, values), color=color, step='post')
+        bottom_negative += np.minimum(0, values)
+
+    ax.plot(x_axis, base_value, color='black', linestyle='--', linewidth=2, label='SHAP Baseline (expected_value)', zorder=10)
+    ax.plot(x_axis, actual_prediction, color='red', linestyle='-', linewidth=2.5, label='Tatsächliche Vorhersage', zorder=10)
+
+    ax.set_title("SHAP Force Plot: Positive vs. Negative Feature-Beiträge", fontsize=16)
+    ax.set_xlabel("Zeitschritt im Vorhersage-Horizont")
+    ax.set_ylabel("Vorhergesagter Wert")
+    ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
+    fig.tight_layout(rect=[0, 0, 0.85, 1])
+    plt.savefig(output_filename)
+    plt.close(fig)
+    print(f"✅ SHAP-Force-Plot gespeichert unter: {output_filename}")
+
+def create_event_shap_wrapper(model_wrapper, instance_to_explain, background_data):
+    """
+    Erstellt eine Wrapper-Funktion für Event-Level-SHAP-Erklärungen.
+
+    Diese Funktion gibt eine neue Funktion zurück, die von shap.KernelExplainer
+    verwendet werden kann, um die Wichtigkeit von Zeitschritten (Events) zu bewerten.
+
+    Args:
+        model_wrapper (callable): Der bereits existierende Modell-Wrapper, der einen
+                                  Batch von Sequenzen (N, L, C) entgegennimmt und
+                                  Vorhersagen (N, H) zurückgibt.
+        instance_to_explain (np.ndarray): Die zu erklärende Instanz mit Shape (1, seq_len, n_features).
+        background_data (np.ndarray): Die Hintergrund-Daten mit Shape (n_samples, seq_len, n_features).
+
+    Returns:
+        callable: Eine Funktion, die einen Koalitionsvektor entgegennimmt und
+                  Modellvorhersagen für die daraus erstellten synthetischen
+                  Daten zurückgibt.
+    """
+    seq_len = instance_to_explain.shape[1]
+    n_background_samples = background_data.shape[0]
+
+    def event_shap_wrapper(coalition_vector):
+        """
+        Diese Funktion wird vom SHAP-Explainer aufgerufen.
+
+        Args:
+            coalition_vector (np.ndarray): Ein 2D-Array der Form (num_coalitions, seq_len)
+                                           mit 0en und 1en. Eine 1 an Position (i, t)
+                                           bedeutet, dass für die i-te Koalition der
+                                           Zeitschritt t "anwesend" ist.
+        """
+        num_coalitions = coalition_vector.shape[0]
+
+        # 1. Erstelle einen Batch von Hintergrund-Samples.
+        # Wähle für jede zu testende Koalition zufällig ein Hintergrund-Fenster aus.
+        background_indices = np.random.choice(n_background_samples, num_coalitions, replace=True)
+        synth_batch = background_data[background_indices].copy() # .copy() ist wichtig!
+
+        # 2. Perturbiere den Batch basierend auf dem Koalitionsvektor.
+        # Iteriere durch jede synthetische Probe im Batch.
+        for i in range(num_coalitions):
+            # Finde die Indizes der "anwesenden" Zeitschritte für diese Koalition.
+            present_timesteps = np.where(coalition_vector[i] == 1)[0]
+
+            # Wenn Zeitschritte anwesend sind, ersetze sie mit den Werten
+            # aus der Original-Instanz.
+            if len(present_timesteps) > 0:
+                # Dies ist der entscheidende Schritt: Wir ersetzen ganze Zeit-Scheiben.
+                # synth_batch[i, t, :] wird durch instance_to_explain[0, t, :] ersetzt.
+                synth_batch[i, present_timesteps, :] = instance_to_explain[0, present_timesteps, :]
+
+        # 3. Führe das Modell auf dem synthetischen Batch aus.
+        return model_wrapper.forward(synth_batch)
+
+    return event_shap_wrapper
+
+def plot_event_importance(instance_data, event_shap_values, target_channel_idx, channel_names, output_filename):
+    """
+    Visualisiert die Wichtigkeit von Zeitschritten (Events) für die Vorhersage.
+    """
+    seq_len = instance_data.shape[1]
+    target_channel_name = channel_names[target_channel_idx]
+    mean_abs_shap_per_step = np.mean(np.abs(event_shap_values), axis=1)
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
+    
+    x_axis = np.arange(seq_len)
+    ax1.plot(x_axis, instance_data[0, :, target_channel_idx], color="#4E79A7", label=f"Input-Verlauf '{target_channel_name}'")
+    ax1.set_title(f"Event (Zeitschritt) Wichtigkeit für die Vorhersage von '{target_channel_name}'")
+    ax1.set_ylabel("Wert")
+    ax1.legend(loc="upper left")
+
+    normalized_importance = (mean_abs_shap_per_step - mean_abs_shap_per_step.min()) / (mean_abs_shap_per_step.max() - mean_abs_shap_per_step.min())
+    colors = plt.cm.viridis(normalized_importance)
+    ax2.bar(x_axis, np.ones(seq_len), color=colors, width=1.0)
+    ax2.set_yticks([])
+    ax2.set_xlabel("Zeitschritt im Input-Fenster")
+    ax2.set_ylabel("Wichtigkeit", rotation=0, ha='right', va='center', labelpad=40)
+    
+    sm = plt.cm.ScalarMappable(cmap=plt.cm.viridis, norm=plt.Normalize(vmin=mean_abs_shap_per_step.min(), vmax=mean_abs_shap_per_step.max()))
+    cbar = fig.colorbar(sm, ax=ax2, orientation='vertical', fraction=0.1, pad=0.02)
+    cbar.set_label('Mittlerer |SHAP-Wert|')
+
+    plt.tight_layout(pad=0.1, h_pad=1.5)
+    plt.savefig(output_filename)
+    plt.close(fig)
+    print(f"✅ Event-Wichtigkeits-Plot gespeichert unter: {output_filename}")
+
+def plot_all_channels_colored_by_importance(instance_data, event_shap_values, target_channel_name, channel_names, output_filename):
+    """
+    Erstellt einen Multi-Panel-Plot, der für jeden Input-Kanal den Zeitverlauf
+    anzeigt, eingefärbt nach der Event-Wichtigkeit auf einer logarithmischen Skala.
+    """
+    # Importiere die notwendigen Module für den Plot
+    from matplotlib.collections import LineCollection
+    from matplotlib.colors import LogNorm
+
+    n_features = instance_data.shape[2]
+    seq_len = instance_data.shape[1]
+
+    # Erstelle eine Figur mit so vielen Subplots wie es Kanäle gibt
+    fig, axes = plt.subplots(n_features, 1, figsize=(20, 5 * n_features), sharex=True, constrained_layout=True)
+    fig.suptitle(f"Einfluss aller Input-Kanäle auf die Vorhersage von '{target_channel_name}'\n(Linienfarbe zeigt Wichtigkeit des Zeitpunkts)", fontsize=18, weight='bold')
+
+    # 1. Berechne die Wichtigkeit EINMAL für alle Plots
+    importance_per_step = np.mean(np.abs(event_shap_values), axis=1)
+
+    # 2. Logarithmische Normalisierung, um kleine Unterschiede sichtbar zu machen
+    # Füge eine winzige Konstante hinzu, um log(0) zu vermeiden.
+    epsilon = 1e-10
+    norm = LogNorm(vmin=np.maximum(importance_per_step.min(), epsilon), vmax=importance_per_step.max())
+    cmap = plt.cm.viridis
+
+    # Iteriere durch jeden Kanal und erstelle einen eigenen Subplot
+    for i, ax in enumerate(axes):
+        series_data = instance_data[0, :, i]
+        x_axis = np.arange(seq_len)
+
+        # Erstelle die Liniensegmente für die LineCollection
+        points = np.array([x_axis, series_data]).T.reshape(-1, 1, 2)
+        segments = np.concatenate([points[:-1], points[1:]], axis=1)
+
+        # Erstelle die LineCollection mit dickerer Linie
+        lc = LineCollection(segments, cmap=cmap, norm=norm)
+        segment_colors = (importance_per_step[:-1] + importance_per_step[1:]) / 2
+        lc.set_array(segment_colors + epsilon) # Füge auch hier epsilon hinzu
+        lc.set_linewidth(3.0) # <-- DICKERE LINIE
+
+        ax.add_collection(lc)
+        ax.set_xlim(x_axis.min(), x_axis.max())
+        ax.set_ylim(series_data.min() - 0.1 * np.ptp(series_data), series_data.max() + 0.1 * np.ptp(series_data))
+        ax.set_title(f"Input-Verlauf: '{channel_names[i]}'", fontsize=12)
+        ax.set_ylabel("Wert")
+
+    # WUNSCH: Die Farbleiste wird entfernt, da sie als redundant empfunden wird.
+    # Die Intuition "Gelb = wichtig" ist ausreichend.
+    # fig.colorbar(lc, ax=axes.ravel().tolist(), label="Mittlerer |SHAP-Wert| (Log-Skala)", pad=0.01)
+    axes[-1].set_xlabel("Zeitschritt im Input-Fenster") # Nur die unterste x-Achse beschriften
+    plt.savefig(output_filename)
+    plt.close(fig)
+    print(f"✅ Farbiger Multi-Kanal Zeitreihen-Plot gespeichert unter: {output_filename}")
+
+def plot_all_channels_with_background_importance(instance_data, event_shap_values, target_channel_name, channel_names, output_filename):
+    """
+    Erstellt einen Multi-Panel-Plot, bei dem der Hintergrund jedes Plots
+    die Richtung des Einflusses auf einer SymLog-Skala anzeigt.
+    """
+    from matplotlib.colors import SymLogNorm
+
+    n_features = instance_data.shape[2]
+    seq_len = instance_data.shape[1]
+
+    fig, axes = plt.subplots(n_features, 1, figsize=(20, 5 * n_features), sharex=True, constrained_layout=True)
+    fig.suptitle(
+        f"Einflussrichtung auf '{target_channel_name}' (SymLog-Skala)\n(Gelb: Positiver Einfluss, Violett: Negativer Einfluss)",
+        fontsize=18, weight='bold'
+    )
+
+    # 1. Berechne die *gerichtete* Wichtigkeit (ohne Absolutwert)
+    directional_importance = np.mean(event_shap_values, axis=1)
+
+    # 2. Erstelle eine symmetrisch-logarithmische Normalisierung
+    max_abs_val = np.max(np.abs(directional_importance))
+    # linthresh definiert den Bereich um 0, der linear skaliert wird.
+    # Ein kleiner Wert dehnt die Werte nahe 0 stark.
+    linthresh = max_abs_val * 0.01 if max_abs_val > 0 else 1e-9
+    norm = SymLogNorm(linthresh=linthresh, vmin=-max_abs_val, vmax=max_abs_val)
+    cmap = plt.cm.viridis # Wie gewünscht: Viridis
+
+    for i, ax in enumerate(axes):
+        series_data = instance_data[0, :, i]
+        x_axis = np.arange(seq_len)
+
+        points = np.array([x_axis, series_data]).T.reshape(-1, 1, 2)
+        segments = np.concatenate([points[:-1], points[1:]], axis=1)
+
+        lc = LineCollection(segments, cmap=cmap, norm=norm)
+        segment_colors = (directional_importance[:-1] + directional_importance[1:]) / 2
+        lc.set_array(segment_colors)
+        lc.set_linewidth(3.0)
+
+        ax.add_collection(lc)
+        ax.set_xlim(x_axis.min(), x_axis.max())
+        ax.set_ylim(series_data.min() - 0.1 * np.ptp(series_data), series_data.max() + 0.1 * np.ptp(series_data))
+        ax.set_title(f"Input-Verlauf: '{channel_names[i]}'", fontsize=12)
+        ax.set_ylabel("Wert")
+
+    fig.colorbar(lc, ax=axes.ravel().tolist(), label="Mittlerer SHAP-Wert (SymLog-Skala)", pad=0.01)
+    axes[-1].set_xlabel("Zeitschritt im Input-Fenster")
+    plt.savefig(output_filename)
+    plt.close(fig)
+    print(f"✅ Farbiger SymLog-direktionaler Plot gespeichert unter: {output_filename}")
+
+def plot_event_saliency_with_prediction(instance_data, prediction_data, event_shap_values, target_channel_idx, channel_names, output_filename):
+    """
+    Erstellt eine Saliency-Map-Visualisierung, die sich auf die 2D-Heatmap konzentriert.
+    Der Kontext-Plot wurde entfernt, um Irreführung zu vermeiden.
+    """
+    seq_len = instance_data.shape[1]
+    horizon = prediction_data.shape[0]
+    target_channel_name = channel_names[target_channel_idx]
+
+    # Nur noch ein einzelner Plot, keine geteilte Achse mehr.
+    fig, ax = plt.subplots(figsize=(20, 8))
+
+    # --- Die 2D Saliency Map (Input-Zeit vs. Output-Zeit) ---
+    # VERBESSERUNG: Wir plotten die absoluten SHAP-Werte mit 'viridis', um die
+    # Magnitude der Wichtigkeit hervorzuheben, was leichter zu interpretieren ist.
+    saliency_map = np.abs(event_shap_values)
+    im = ax.imshow(saliency_map.T, aspect='auto', cmap='viridis', interpolation='nearest')
+
+    # Titel direkt auf die Achse setzen
+    ax.set_title(f"Saliency Map für '{target_channel_name}': Einfluss von Input-Zeit (X) auf Output-Zeit (Y)", fontsize=16)
+    ax.set_xlabel("Zeitschritt im Input-Fenster (t_input)")
+    ax.set_ylabel("Zeitschritt im Vorhersage-Horizont (t_pred)")
+    fig.colorbar(im, ax=ax, label="Absoluter SHAP-Wert (|Einfluss|)")
+
+    # Die X-Achse muss nur noch die Input-Länge umfassen
+    ax.set_xlim(-0.5, seq_len - 0.5)
+
+    plt.tight_layout()
+    plt.savefig(output_filename)
+    plt.close(fig)
+    print(f"✅ Saliency-Map-Plot gespeichert unter: {output_filename}")
+
 def main():
     """
     Hauptfunktion zum Laden des Modells, der Daten und zur Ausführung der SHAP-Analyse.
@@ -221,7 +529,11 @@ def main():
     # 'median': Konstante Median-Linie pro Kanal (schnell, aber einfach).
     # 'kmeans': Repräsentative Fenster aus den Trainingsdaten (Best Practice, langsamer).
     BACKGROUND_MODE = 'kmeans'
-    TARGET_CHANNEL = "wassertemp"
+    # --- NEU: Konfigurierbare Anzahl an Samples für Event-SHAP ---
+    # 'auto' ist schnell, kann aber zu instabilen Ergebnissen führen.
+    # Ein höherer Wert (z.B. 2048) ist langsamer, aber deutlich robuster.
+    EVENT_SHAP_NSAMPLES = 2048
+    TARGET_CHANNEL = "wassertemp" # <-- HIER ÄNDERN, um die Vorhersage für Lufttemperatur zu erklären
 
     # --- NEU: Priorisiere CUDA für die Inferenz, mit CPU als Fallback ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -284,8 +596,8 @@ def main():
         print(f"  - Hintergrunddaten mit Shape {background_data.shape} erstellt.")
 
     elif BACKGROUND_MODE == 'kmeans':
-        N_BACKGROUND_SAMPLES = 200  # Anzahl der Cluster für K-Means
-        MAX_WINDOWS_FOR_KMEANS = 20000  # Teilmenge für bessere Performance
+        N_BACKGROUND_SAMPLES = 50  # Anzahl der Cluster für K-Means
+        MAX_WINDOWS_FOR_KMEANS = 10000  # Teilmenge für bessere Performance
         print(f"\nErstelle Hintergrunddaten (Modus 2) basierend auf K-Means Clustering ({N_BACKGROUND_SAMPLES} Zentren)...")
         
         # Erstelle alle möglichen gleitenden Fenster aus den Trainingsdaten
@@ -505,6 +817,92 @@ def main():
         shap_values_sum=shap_values_sum,
         horizon=horizon,
         output_filename="shap_additivity_check.png"
+    )
+
+    # --- NEU: Plot 5: Der erklärende Wasserfall-Plot ---
+    print("\nErstelle den SHAP-Wasserfall-Plot, um die Vorhersage zu erklären...")
+    plot_shap_waterfall(
+        actual_prediction=prediction_for_instance_target,
+        base_value=shap_internal_baseline,
+        shap_values=shap_values_array,
+        channel_names=channel_names,
+        horizon=horizon,
+        output_filename="shap_waterfall_explanation.png"
+    )
+
+    # --- NEU: Plot 6: Der detaillierte Force-Plot über die Zeit ---
+    print("\nErstelle den detaillierten SHAP-Force-Plot...")
+    plot_shap_force_over_time(
+        actual_prediction=prediction_for_instance_target,
+        base_value=shap_internal_baseline,
+        shap_values=shap_values_array,
+        channel_names=channel_names,
+        horizon=horizon,
+        output_filename="shap_force_plot_over_time.png"
+    )
+
+    # --- NEUE SEKTION: Event-Level SHAP Analyse ---
+    print("\n" + "="*25 + " EVENT-LEVEL SHAP ANALYSIS " + "="*25)
+
+    # 1. Erstelle den spezifischen Wrapper für Event-Erklärungen
+    event_wrapper_fn = create_event_shap_wrapper(
+        model_wrapper=wrapped_model,
+        instance_to_explain=instance_to_explain,
+        background_data=background_data
+    )
+
+    # 2. Bereite die Inputs für den KernelExplainer vor (angepasst für Events)
+    event_background_summary = np.zeros((1, seq_len))
+    event_instance_for_shap = np.ones((1, seq_len))
+
+    # 3. Initialisiere und führe den Explainer aus
+    print("\nInitialisiere KernelExplainer für Events...")
+    event_explainer = shap.KernelExplainer(event_wrapper_fn, event_background_summary)
+
+    print("Berechne Event-SHAP-Werte (dies kann eine Weile dauern)...")
+    # Die resultierenden SHAP-Werte haben die Form (seq_len, horizon)
+    event_shap_values = event_explainer.shap_values(event_instance_for_shap, nsamples=EVENT_SHAP_NSAMPLES)[0]
+    print(f"✅ Berechnung abgeschlossen. Event-SHAP-Werte haben Shape: {event_shap_values.shape}")
+
+    # 4. Visualisiere die Event-Wichtigkeit
+    print("\nVisualisiere Event-Wichtigkeit...")
+    plot_event_importance(
+        instance_data=instance_to_explain,
+        event_shap_values=event_shap_values,
+        target_channel_idx=target_channel_idx,
+        channel_names=channel_names,
+        output_filename="shap_event_importance.png"
+    )
+
+    # 5. Visualisiere die Saliency Map
+    print("\nVisualisiere die detaillierte Saliency Map...")
+    plot_event_saliency_with_prediction(
+        instance_data=instance_to_explain,
+        prediction_data=prediction_for_instance[0, target_channel_idx, :], # Die Vorhersage für den Zielkanal
+        event_shap_values=event_shap_values,
+        target_channel_idx=target_channel_idx,
+        channel_names=channel_names,
+        output_filename="shap_saliency_map.png"
+    )
+
+    # 6. Visualisiere den farbigen Zeitreihen-Plot (Magnitude der Wichtigkeit)
+    print("\nVisualisiere den farbigen Multi-Kanal Zeitreihen-Plot...")
+    plot_all_channels_colored_by_importance(
+        instance_data=instance_to_explain,
+        event_shap_values=event_shap_values,
+        target_channel_name=TARGET_CHANNEL,
+        channel_names=channel_names,
+        output_filename="shap_colored_multichannel_importance.png"
+    )
+
+    # 7. NEU: Visualisiere den farbigen Zeitreihen-Plot (Richtung der Wichtigkeit)
+    print("\nVisualisiere den direktionalen farbigen Multi-Kanal Zeitreihen-Plot (SymLog)...")
+    plot_all_channels_colored_by_symlog_importance(
+        instance_data=instance_to_explain,
+        event_shap_values=event_shap_values,
+        target_channel_name=TARGET_CHANNEL,
+        channel_names=channel_names,
+        output_filename="shap_colored_multichannel_symlog_directional_importance.png"
     )
 
 if __name__ == "__main__":

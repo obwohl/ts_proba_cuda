@@ -514,8 +514,8 @@ class DUETProb(ModelBase):
                 # === FIX: Speichere nur Python-Skalare (.item()), keine Tensoren, um Speicherlecks zu verhindern ===
                 # === PERFORMANCE-FIX: Entferne die Sammlung von CRPS-Metriken im Trainings-Loop. ===
                 # Die Berechnung ist aufgrund des SciPy-Fallbacks für icdf extrem langsam.
-                # Die CRPS-Validierung am Ende der Epoche ist ausreichend und effizienter.
-                epoch_total_losses, epoch_importance_losses, epoch_normalized_losses = [], [], []
+                # Die Validierung am Ende der Epoche ist ausreichend und effizienter.
+                epoch_total_losses, epoch_importance_losses, epoch_normalized_losses, epoch_denorm_losses_per_channel = [], [], [], []
                 # epoch_crps_losses, epoch_channel_losses, epoch_normalized_channel_losses wurden entfernt.
 
 
@@ -597,6 +597,12 @@ class DUETProb(ModelBase):
 
                         # Der Gesamtverlust ist jetzt die Summe aus dem NLL-Loss und dem MoE-Loss.
                         total_loss = normalized_loss + config.loss_coef * loss_importance
+
+                        # === NEU: Berechne den denormalisierten Loss pro Kanal für das Logging ===
+                        # Dies geschieht nach der Haupt-Loss-Berechnung, um die Optimierung nicht zu verlangsamen.
+                        with torch.no_grad():
+                            denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
+                            epoch_denorm_losses_per_channel.append(denorm_loss_per_sample.cpu().numpy())
 
                         # --- NEU: Skaliere den Loss und führe Backward-Pass aus ---
                         scaled_loss = total_loss / accumulation_steps
@@ -688,13 +694,29 @@ class DUETProb(ModelBase):
                 avg_train_total_loss = np.mean(epoch_total_losses)
                 avg_train_norm_loss = np.mean(epoch_normalized_losses)
                 avg_train_importance_loss = np.mean(epoch_importance_losses)
-
-                writer.add_scalar("Loss/Train_Total", avg_train_total_loss, epoch)
-                writer.add_scalar("Loss_Normalized/Train_NLL", avg_train_norm_loss, epoch)
-                writer.add_scalar("Loss/Train_Importance", avg_train_importance_loss, epoch)
                 
-                # === PERFORMANCE-FIX: Logging für Trainings-CRPS entfernt. ===
-                # Die relevanten Validierungs-CRPS-Werte werden weiterhin geloggt.
+                # --- Gruppe A: Verluste, die für die Optimierung verwendet werden (normalisiert) ---
+                writer.add_scalar("A) Overall Loss (for Optimizer)/Train_Total_Loss (NLL+MoE)", avg_train_total_loss, epoch)
+                writer.add_scalar("A) Overall Loss (for Optimizer)/Train_Normalized_NLL", avg_train_norm_loss, epoch)
+                writer.add_scalar("A) Overall Loss (for Optimizer)/Train_MoE_Importance_Loss", avg_train_importance_loss, epoch)
+
+                # --- Gruppe D: Normalisierter NLL-Vergleich (für Debugging) ---
+                writer.add_scalars("D) Normalized NLL (for Debugging)", {'Train': avg_train_norm_loss}, epoch)
+
+                # --- Gruppe C & B: Denormalisierte Trainings-Verluste berechnen und loggen ---
+                if epoch_denorm_losses_per_channel:
+                    # Kombiniere die Verluste aller Batches zu einem großen Array [num_samples, num_channels]
+                    all_train_losses_denorm = np.concatenate(epoch_denorm_losses_per_channel, axis=0)
+                    
+                    # Logge den Durchschnitt über alle Kanäle (für Gruppe B)
+                    avg_train_loss_all_channels = np.mean(all_train_losses_denorm)
+                    writer.add_scalar("B) Denormalized NLL (Evaluation)/Train_Avg_AllChannels", avg_train_loss_all_channels, epoch)
+
+                    # Logge den Loss pro Kanal (für Gruppe C)
+                    avg_train_loss_per_channel = np.mean(all_train_losses_denorm, axis=0)
+                    channel_names = list(self.config.channel_bounds.keys())
+                    for i, name in enumerate(channel_names):
+                        writer.add_scalars(f"C) Denormalized NLL per Channel/{name}", {'Train': avg_train_loss_per_channel[i]}, epoch)
 
                 # --- Mittelung der Experten-Metriken über die Epoche ---
                 # === FIX: Berechne den Durchschnitt aus den laufenden Summen ===
@@ -710,28 +732,28 @@ class DUETProb(ModelBase):
                 # Log Gating-Gewichte
                 if avg_gate_weights_linear is not None:
                     for i, weight in enumerate(avg_gate_weights_linear):
-                        writer.add_scalar(f"Expert_Gating_Weights/Linear_{i}", weight.item(), epoch)
+                        writer.add_scalar(f"E) Expert Gating (Train)/Weights/Linear_{i}", weight.item(), epoch)
                 if avg_gate_weights_uni_esn is not None:
                     for i, weight in enumerate(avg_gate_weights_uni_esn):
-                        writer.add_scalar(f"Expert_Gating_Weights/ESN_univariate_{i}", weight.item(), epoch)
+                        writer.add_scalar(f"E) Expert Gating (Train)/Weights/ESN_univariate_{i}", weight.item(), epoch)
                 if avg_gate_weights_multi_esn is not None:
                     for i, weight in enumerate(avg_gate_weights_multi_esn):
-                        writer.add_scalar(f"Expert_Gating_Weights/ESN_multivariate_{i}", weight.item(), epoch)
+                        writer.add_scalar(f"E) Expert Gating (Train)/Weights/ESN_multivariate_{i}", weight.item(), epoch)
 
                 # Log Selection Counts
                 if avg_selection_counts.numel() > 0:
                     expert_idx = 0
                     # Log linear experts
                     for i in range(config.num_linear_experts):
-                        writer.add_scalar(f"Expert_Selection_Counts/Linear_{i}", avg_selection_counts[expert_idx].item(), epoch)
+                        writer.add_scalar(f"E) Expert Gating (Train)/Selection_Counts/Linear_{i}", avg_selection_counts[expert_idx].item(), epoch)
                         expert_idx += 1
                     # Log univariate ESN experts
                     for i in range(config.num_univariate_esn_experts):
-                        writer.add_scalar(f"Expert_Selection_Counts/ESN_univariate_{i}", avg_selection_counts[expert_idx].item(), epoch)
+                        writer.add_scalar(f"E) Expert Gating (Train)/Selection_Counts/ESN_univariate_{i}", avg_selection_counts[expert_idx].item(), epoch)
                         expert_idx += 1
                     # Log multivariate ESN experts
                     for i in range(config.num_multivariate_esn_experts):
-                        writer.add_scalar(f"Expert_Selection_Counts/ESN_multivariate_{i}", avg_selection_counts[expert_idx].item(), epoch)
+                        writer.add_scalar(f"E) Expert Gating (Train)/Selection_Counts/ESN_multivariate_{i}", avg_selection_counts[expert_idx].item(), epoch)
                         expert_idx += 1
 
                 # --- Mittelung und Logging der Channel-Masken ---
@@ -753,12 +775,12 @@ class DUETProb(ModelBase):
                         dist_stats['scale_std'] = base_distr.scale.std().item()
 
                         # Logge die extrahierten Statistiken nach TensorBoard
-                        writer.add_scalar("Distribution_Stats/df_mean", dist_stats['df_mean'], epoch)
-                        writer.add_scalar("Distribution_Stats/df_std", dist_stats['df_std'], epoch)
-                        writer.add_scalar("Distribution_Stats/loc_mean", dist_stats['loc_mean'], epoch)
-                        writer.add_scalar("Distribution_Stats/loc_std", dist_stats['loc_std'], epoch)
-                        writer.add_scalar("Distribution_Stats/scale_mean", dist_stats['scale_mean'], epoch)
-                        writer.add_scalar("Distribution_Stats/scale_std", dist_stats['scale_std'], epoch)
+                        writer.add_scalar("F) Distribution Stats (Train)/df_mean", dist_stats['df_mean'], epoch)
+                        writer.add_scalar("F) Distribution Stats (Train)/df_std", dist_stats['df_std'], epoch)
+                        writer.add_scalar("F) Distribution Stats (Train)/loc_mean", dist_stats['loc_mean'], epoch)
+                        writer.add_scalar("F) Distribution Stats (Train)/loc_std", dist_stats['loc_std'], epoch)
+                        writer.add_scalar("F) Distribution Stats (Train)/scale_mean", dist_stats['scale_mean'], epoch)
+                        writer.add_scalar("F) Distribution Stats (Train)/scale_std", dist_stats['scale_std'], epoch)
 
                 metric_for_optimization = float('nan') # Fallback, falls keine Validierung stattfindet
 
@@ -768,11 +790,11 @@ class DUETProb(ModelBase):
                     # all_window_losses_denorm hat jetzt die Form [num_windows, num_channels]
                     all_window_losses_denorm, all_window_losses_norm = self.validate(valid_data_loader, writer, epoch, device, desc=f"Epoch {epoch+1} Validation")
                     
-                    # --- NEU: Logge die denormalisierten Verluste pro Kanal ---
+                    # --- Gruppe C: Logge die denormalisierten Validierungs-Verluste pro Kanal ---
                     channel_names = list(self.config.channel_bounds.keys())
                     for i, name in enumerate(channel_names):
                         avg_channel_loss = np.mean(all_window_losses_denorm[:, i])
-                        writer.add_scalar(f"Loss_per_Channel/Validation_{name}", avg_channel_loss, epoch)
+                        writer.add_scalars(f"C) Denormalized NLL per Channel/{name}", {'Validation': avg_channel_loss}, epoch)
 
                     # --- NEU: Logik zur Auswahl der Optimierungsmetrik ---
                     # Diese Logik ist jetzt robust: Sie bricht bei einer Fehlkonfiguration ab,
@@ -803,14 +825,9 @@ class DUETProb(ModelBase):
                     avg_metric_for_opt = np.mean(losses_for_optimization)
                     cvar_metric_for_opt = calculate_cvar(losses_for_optimization, self.config.cvar_alpha)
 
-                    # --- Logge die globalen Metriken (über alle Kanäle gemittelt) zur Beobachtung ---
+                    # --- Gruppe B: Logge die globalen Validierungs-Metriken (denormalisiert) ---
                     overall_avg_nll = np.mean(all_window_losses_denorm)
                     overall_cvar_nll = calculate_cvar(all_window_losses_denorm.mean(axis=1), self.config.cvar_alpha)
-                    writer.add_scalar("Loss/Validation_Overall_Avg_NLL", overall_avg_nll, epoch)
-                    writer.add_scalar("Loss/Validation_Overall_CVaR_NLL", overall_cvar_nll, epoch)
-                    writer.add_scalar("Loss_Normalized/Validation_Avg_NLL", np.mean(all_window_losses_norm), epoch)
-
-                    # --- NEU: Logge die spezifischen Metriken des Zielkanals, falls vorhanden ---
                     if target_channel and target_channel in channel_names:
                         # In diesem Fall sind die "Optimierungsmetriken" genau die des Zielkanals.
                         writer.add_scalar(f"Loss_Target_{target_channel}/Validation_Avg_NLL", avg_metric_for_opt, epoch)
