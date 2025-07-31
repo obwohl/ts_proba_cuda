@@ -8,7 +8,7 @@ from pathlib import Path
 # Annahme: Das Skript liegt im Hauptverzeichnis des "Inferenz-Pakets".
 from ts_benchmark.baselines.duet.models.duet_prob_model import DUETProbModel
 from ts_benchmark.baselines.duet.duet_prob import TransformerConfig
-
+#test
 
 # --- Feste Konfiguration ---
 # Die Spaltenreihenfolge muss exakt der beim Training entsprechen!
