@@ -11,7 +11,8 @@ from ts_benchmark.baselines.duet.layers.linear_extractor_cluster import Linear_e
 from ts_benchmark.baselines.duet.utils.masked_attention import Mahalanobis_mask, Encoder, EncoderLayer, FullAttention, AttentionLayer
 
 # === NEUE PROBABILISTISCHE KOMPONENTEN ===
-from ts_benchmark.baselines.duet.skewed_student_t_standalone import StudentTOutput, MLPProjectionHead
+from ts_benchmark.baselines.duet.johnson_system import JohnsonOutput
+from ts_benchmark.baselines.duet.layers.common import MLPProjectionHead
 from ts_benchmark.baselines.duet.layers.esn.reservoir_expert import UnivariateReservoirExpert, MultivariateReservoirExpert
 
 class DenormalizingDistribution:
@@ -140,21 +141,19 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
             norm_layer=torch.nn.LayerNorm(config.d_model)
         )
 
-        # --- NEU: Probabilistischer Kopf für Student's T (ersetzt den alten SBP-Kopf) ---
-        # Helfer, um die Dimensionen der Verteilungsparameter zu bekommen
-        self.distr_output_helper = StudentTOutput()
+        # --- NEU: Probabilistischer Kopf für Johnson-System ---
+        # Initialisiere den Output-Layer mit den Kanaltypen aus der Konfiguration
+        self.distr_output = JohnsonOutput(config.johnson_channel_types)
 
         # --- NEU: Ein einziger, vereinheitlichter Projektionskopf pro Kanal ---
-        # Dieser Kopf gibt alle 3 Parameter (df, loc, scale) für den gesamten Horizont aus.
         self.channel_names = list(config.channel_bounds.keys())
         self.projection_heads = nn.ModuleDict()
 
         in_features_per_channel = self.d_model
-        # Output-Dimension: 3 Parameter * Horizontlänge
-        out_features_per_channel = self.horizon * self.distr_output_helper.args_dim
+        # Output-Dimension: 4 Parameter (Johnson) * Horizontlänge
+        out_features_per_channel = self.horizon * self.distr_output.args_dim
 
         hidden_dim_factor = getattr(config, 'projection_head_dim_factor', 2)
-        # Stellen Sie eine vernünftige Mindestgröße für die versteckte Dimension sicher.
         hidden_dim = max(out_features_per_channel, in_features_per_channel // hidden_dim_factor)
 
         for name in self.channel_names:
@@ -171,64 +170,35 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
         if getattr(config, 'use_channel_adjacency_prior', False):
             prior_from_config = getattr(config, 'channel_adjacency_prior', None)
             if prior_from_config is not None:
-                # The prior can be passed as a list of lists, so we ensure it's a tensor.
                 if not isinstance(prior_from_config, torch.Tensor):
                     self.channel_adjacency_prior = torch.tensor(prior_from_config, dtype=torch.float32)
                 else:
                     self.channel_adjacency_prior = prior_from_config
-
-                # Basic validation to prevent common errors
                 if self.channel_adjacency_prior.shape != (self.n_vars, self.n_vars):
                     raise ValueError(
                         f"channel_adjacency_prior shape mismatch. "
                         f"Expected ({self.n_vars}, {self.n_vars}), but got {self.channel_adjacency_prior.shape}"
                     )
 
-        # --- NEU: Verteilungs-Setup für Student's T ---
-        # Wir erstellen nur EINE Instanz, die vektorisiert über alle Kanäle arbeitet.
-        self.distr_output = StudentTOutput()
-
     def forward(self, input_x: torch.Tensor):
-        # Der forward-Pass gibt jetzt ein Verteilungsobjekt und den MoE-Loss zurück.
         # input_x: [Batch, SeqLen, NVars]
         
-        # --- 1. Normaler Modell-Pfad ---
-        # RevIN (mit subtract_last) wird direkt auf den Original-Input angewendet.
-        # RevIN gibt die normalisierten Daten und die Statistiken (mean, std) zurück.
         x_for_main_model, stats = self.cluster.revin(input_x, 'norm')
         x_for_main_model = torch.nan_to_num(x_for_main_model)
 
-        # 2. Zeitliche Mustererkennung mit MoE (Linear_extractor_cluster)
         if self.CI:
-            # Behandle jeden Kanal unabhängig
             channel_independent_input = rearrange(x_for_main_model, 'b l n -> (b n) l 1')
             reshaped_output, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts = self.cluster(channel_independent_input)
             temporal_feature = rearrange(reshaped_output, '(b n) d 1 -> b d n', b=input_x.shape[0])
         else:
-            # Das Cluster erhält die normalisierten Features direkt, da die Kanalinteraktion
-            # später im Channel-Transformer stattfindet.
             temporal_feature, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts = self.cluster(x_for_main_model)
 
-        # 3. Kanalübergreifende Interaktion mit Channel-Transformer
-        # temporal_feature ist [B, D_Model, N_Vars] -> umformen zu [B, N_Vars, D_Model]
         temporal_feature = rearrange(temporal_feature, 'b d n -> b n d')
         
-        # Initialisiere die Matrizen, die zurückgegeben werden sollen
         p_learned, p_final = None, None
 
         if self.n_vars > 1:
-            # --- DESIGN-VERBESSERUNG: Die Maske wird auf den un-gemischten Daten berechnet. ---
-            # Die Mahalanobis-Maske soll die *intrinsische* Ähnlichkeit der Signale
-            # bewerten. Der `pre_cluster_mixer` vermischt die Kanäle, was diese
-            # Messung "verschmutzen" und zu widersprüchlichen Gradienten führen kann.
-            # Wir übergeben daher die reinen, normalisierten Daten (`x_for_main_model`) an die Maske.
             changed_input = rearrange(x_for_main_model, 'b l n -> b n l')
-
-            # --- BUG FIX: Removed noise addition. ---
-            # The noise, intended for a past version of the distance metric, breaks the
-            # shift-invariance of the FFT's magnitude, preventing the mask from correctly
-            # identifying time-shifted signals. The current implementation does not need it.
-            
             channel_mask, p_learned, p_final = self.mask_generator(
                 changed_input,
                 channel_adjacency_prior=self.channel_adjacency_prior
@@ -236,44 +206,23 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
             channel_group_feature, _ = self.Channel_transformer(x=temporal_feature, attn_mask=channel_mask)
         else:
             channel_group_feature = temporal_feature
-            # Erstelle Dummy-Matrizen für den Fall mit einer einzelnen Variable, um die Signatur konsistent zu halten.
             if self.n_vars == 1:
                 p_learned = torch.ones(input_x.shape[0], 1, 1, device=input_x.device)
                 p_final = torch.ones(input_x.shape[0], 1, 1, device=input_x.device)
 
-        # 4. Erzeugung der Verteilungsparameter für Student's T
-        # channel_group_feature ist [B, N_Vars, D_Model]
         distr_params_list = []
         for i, name in enumerate(self.channel_names):
-            # Select feature vector for the current channel: [B, D_Model]
             channel_feature = channel_group_feature[:, i, :]
-            
-            # Pass through the unified projection head to get all parameters for the horizon
-            # Output is a flat tensor: [B, Horizon * 3]
             flat_params = self.projection_heads[name](channel_feature)
-            
-            # Reshape to separate parameters for each time step: [B, Horizon, 3]
-            # The last dimension contains (df, loc, scale) in their raw form.
-            reshaped_params = rearrange(flat_params, 'b (h p) -> b h p', h=self.horizon)
-            
+            reshaped_params = rearrange(flat_params, 'b (h p) -> b h p', h=self.horizon, p=self.distr_output.args_dim)
             distr_params_list.append(reshaped_params)
 
-        # Stack all channel parameters along a new dimension to get the final tensor
-        # Shape: [B, N_Vars, Horizon, 3]
         distr_params = torch.stack(distr_params_list, dim=1)
-
-        # Verhindere NaN/inf in den Parametern, bevor sie an die Verteilung gehen
         distr_params = torch.nan_to_num(distr_params, nan=0.0, posinf=1e4, neginf=-1e4)
 
-        # 5. Erstellung des finalen Verteilungsobjekts (VEKTORISIERT)
-        # Anstatt über Kanäle zu loopen, übergeben wir den gesamten Parameter-Tensor
-        # an eine einzige Verteilungsinstanz, die die Kanal-Dimension intern verarbeitet.
-        # Dies ist ein massiver Performance-Gewinn.
         base_distr = self.distr_output.distribution(distr_params)
         final_distr = DenormalizingDistribution(base_distr, stats)
 
-        # Der alte `denorm`-Schritt am Ende entfällt, da dies jetzt im Wrapper passiert.
-        # KORREKTUR: Gib die Wahrscheinlichkeitsmatrizen zurück, um die 9-Werte-Signatur zu erfüllen.
         return final_distr, base_distr, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, p_learned, p_final
 
     def get_parameter_groups(self):

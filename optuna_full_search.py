@@ -42,8 +42,8 @@ FIXED_PARAMS = {
     "patience": 5,
     "early_stopping_delta": 1e-4,
     
-    # NEU: Umgestellt auf Skewed Student's T Verteilung
-    "distribution_family": "skewed_student_t",
+    # NEU: Umgestellt auf Johnson-System
+    "distribution_family": "johnson_system",
     
     "num_workers": int(os.getenv("TRIAL_WORKERS", "4")),
     "quantiles": [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99], # <-- HIER ERWEITERN
@@ -197,7 +197,7 @@ def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
 
         # 4. Berechne die finalen Metriken auf dem besten Modell
         # Lade das beste Modell und führe eine finale Validierung durch
-        model.model.load_state_dict(model.early_stopping.check_point)
+        model.model.load_state_dict(torch.load(model.early_stopping.path))
         _, valid_data = train_val_split(data, model_hyper_params["train_ratio_in_tv"], model_hyper_params["seq_len"])
         _, valid_loader = forecasting_data_provider(valid_data, model.config, timeenc=1, batch_size=model.config.batch_size, shuffle=False, drop_last=False)
         device = next(model.model.parameters()).device
