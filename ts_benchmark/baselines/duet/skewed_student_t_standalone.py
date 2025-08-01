@@ -159,10 +159,15 @@ class SkewedStudentT(Distribution):
             self._validate_sample(value)
         
         z = (value - self.loc) / self.scale
-        skew_transform = torch.where(z >= 0, 1.0 / self.skew, self.skew)
+        # KORREKTUR: Die Logik wurde invertiert, um die intuitive Konvention zu erfüllen,
+        # bei der skew > 1 eine RECHTSSCHIEFE Verteilung erzeugt.
+        # Bei z >= 0 (rechte Seite) wird der Wert jetzt mit 1/skew gestaucht, was die Wahrscheinlichkeitsdichte erhöht.
+        # Bei z < 0 (linke Seite) wird der Wert mit skew gestreckt, was die Dichte verringert.
+        skew_transform = torch.where(z >= 0, self.skew, 1.0 / self.skew)
         z_skewed = z * skew_transform
 
         log_p_sym = self._standard_t.log_prob(z_skewed)
+
 
         log_p = torch.log(torch.tensor(2.0, device=z.device)) \
                 - torch.log(self.skew + 1.0 / self.skew) \
@@ -212,10 +217,13 @@ class SkewedStudentT(Distribution):
         t_val = self._symmetric_student_t_icdf(q_prime, df)
 
         # Apply the skewness transformation
+        # KORREKTUR: Die Logik wurde invertiert, um die intuitive Konvention zu erfüllen.
+        # Für q < p_skew (linke Seite) wird der Wert jetzt mit 1/skew gestaucht.
+        # Für q >= p_skew (rechte Seite) wird der Wert mit skew gestreckt.
         x = torch.where(
             q_reshaped < p_skew,
-            skew * t_val,
             t_val / skew,
+            skew * t_val,
         )
         return loc + scale * x
 

@@ -865,7 +865,14 @@ class DUETProb(ModelBase):
                     # Speichere den alten besten Loss, um eine Verbesserung zu erkennen
                     old_best_loss = self.early_stopping.val_loss_min
                     # 4. Verwende die ausgewählte Metrik für Early Stopping.
-                    self.early_stopping(metric_for_optimization, self.model.state_dict())
+                    # --- KORREKTUR: Speichere ein Dictionary mit Konfiguration und Gewichten ---
+                    # Dies stellt sicher, dass alle notwendigen Informationen für die spätere
+                    # Inferenz oder Analyse im Checkpoint enthalten sind.
+                    checkpoint_to_save = {
+                        'config_dict': self.config.__dict__,
+                        'model_state_dict': self.model.state_dict()
+                    }
+                    self.early_stopping(metric_for_optimization, checkpoint_to_save)
 
                     # 5. Verwende die ausgewählte Metrik für das Optuna Pruning.
                     if trial:

@@ -28,7 +28,7 @@ logging.getLogger("optuna").setLevel(logging.INFO)
 
 # --- 2. Feste Trainingsparameter für die lange, intensive Suche ---
 FIXED_PARAMS = {
-    "data_file": "eisbach_pure.csv", 
+    "data_file": "preci_eisbach.csv", 
     "horizon": 96,
     "train_ratio_in_tv": 0.9, # NEU: Split-Verhältnis explizit gemacht
     # --- NEU: Wähle die zu optimierende Metrik ---
@@ -37,7 +37,7 @@ FIXED_PARAMS = {
     "optimization_metric": "avg_nll",
     # Setze hier einen Kanalnamen (z.B. "wassertemp"), um den Validierungs-Loss nur für diesen Kanal zu berechnen.
     # Setze auf `None`, um den Durchschnitt über alle Kanäle zu verwenden (Standardverhalten).
-    "optimization_target_channel": "wassertemp",
+    "optimization_target_channel": None,
     "num_epochs": 100,
     "patience": 5,
     "early_stopping_delta": 1e-4,

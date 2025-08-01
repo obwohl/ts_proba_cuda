@@ -17,7 +17,7 @@ import sys
 
 # --- WICHTIG: Passen Sie diese Werte an Ihre Konfiguration an! ---
 # Diese müssen mit den Werten in `run_study.py` übereinstimmen.
-STUDY_NAME = "eisbach_96_studentt_mean_nll_loss_eisbach"
+STUDY_NAME = "eisbach_pure_skewedstudentt_9"
 STORAGE_NAME = "sqlite:///optuna_study.db"
 
 def fix_stale_running_trials(study_name, storage_name):

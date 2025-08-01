@@ -23,12 +23,12 @@ import signal
 # Alles, was Sie anpassen müssen, ist hier an einem Ort.
 
 # -- Studien-Konfiguration --
-STUDY_NAME = "eisbach_pure_skewedstudentt_7"
+STUDY_NAME = "eisbach_preci_2"
 STORAGE_NAME = "sqlite:///optuna_study.db"  # Fester DB-Name. Studien werden intern durch STUDY_NAME unterschieden.
 
 # -- Parallelisierungs-Konfiguration --
 # Wie viele parallele Python-Prozesse (Trials) sollen gestartet werden?
-NUM_PARALLEL_TRIALS = 1
+NUM_PARALLEL_TRIALS = 2
 # Wie viele CPU-Worker soll JEDER Trial für den DataLoader verwenden?
 WORKERS_PER_TRIAL = 8
 # NEU: Eine Verzögerung zwischen dem Start der Worker, um DB-Race-Conditions zu entschärfen.
