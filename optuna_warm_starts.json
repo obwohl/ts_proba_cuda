@@ -10,7 +10,7 @@
     "n_heads": 4,
     "dropout": 0.21006810966390832,
     "fc_dropout": 0.3513033226005804,
-    "batch_size": 512,
+    "batch_size": 1024,
     "use_agc": false,
     "num_linear_experts": 2,
     "num_univariate_esn_experts": 6,

@@ -28,9 +28,9 @@ logging.getLogger("optuna").setLevel(logging.INFO)
 
 # --- 2. Feste Trainingsparameter für die lange, intensive Suche ---
 FIXED_PARAMS = {
-    "data_file": "combo_96.csv", 
+    "data_file": "eisbach_pure.csv", 
     "horizon": 96,
-    "train_ratio_in_tv": 0.8, # NEU: Split-Verhältnis explizit gemacht
+    "train_ratio_in_tv": 0.9, # NEU: Split-Verhältnis explizit gemacht
     # --- NEU: Wähle die zu optimierende Metrik ---
     # 'cvar': Conditional Value at Risk (Durchschnitt der schlechtesten 5% Fehler) -> robustere Modelle
     # 'avg_crps': Durchschnittlicher CRPS-Fehler über alle Fenster -> beste Durchschnitts-Performance
@@ -42,8 +42,8 @@ FIXED_PARAMS = {
     "patience": 5,
     "early_stopping_delta": 1e-4,
     
-    # NEU: explizit 'student_t' als Verteilungskopf festlegen
-    "distribution_family": "student_t",
+    # NEU: Umgestellt auf Skewed Student's T Verteilung
+    "distribution_family": "skewed_student_t",
     
     "num_workers": int(os.getenv("TRIAL_WORKERS", "4")),
     "quantiles": [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99], # <-- HIER ERWEITERN

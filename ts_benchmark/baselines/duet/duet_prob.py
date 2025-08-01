@@ -1,5 +1,6 @@
 import torch
 import optuna
+import inspect
 import os
 import torch.profiler
 import time
@@ -355,7 +356,7 @@ class DUETProb(ModelBase):
                     # === ENDE DIAGNOSE-CODE ===
 
                     # Plot erstellen
-                    fig = self._create_window_plot(
+                    fig = self._create_window_plot( # This calls the other _create_window_plot
                         history=input_sample_tensor.cpu().numpy(),
                         actuals=actuals_data_tensor.cpu().numpy(),
                         prediction_dist=denorm_distr,
@@ -364,7 +365,7 @@ class DUETProb(ModelBase):
                     )
                             
                     # Plot in TensorBoard loggen
-                    tag = f"Hard_Windows/{channel_name}/{method_name}"
+                    tag = f"Hard_Windows | {channel_name} | {method_name}"
                     writer.add_figure(tag, fig, global_step=epoch)
                     # WICHTIG: Schließe die Figur, um Speicherlecks zu verhindern.
                     # Ohne dies sammelt matplotlib Referenzen an, was zu massivem RAM- und Swap-Verbrauch führt.
@@ -397,6 +398,9 @@ class DUETProb(ModelBase):
         log_dir = getattr(config, 'log_dir', f'runs/{self.model_name}_{int(time.time())}')
         setattr(config, 'log_dir', log_dir) # Stelle sicher, dass er für die spätere Verwendung (z.B. Checkpoints) gesetzt ist
         writer = SummaryWriter(log_dir)
+
+        # Define the path for the best model checkpoint
+        model_save_path = os.path.join(log_dir, 'best_model.pt')
         
         # Initialisiere das Modell. `_tune_hyper_params` hat bereits alles Nötige gesetzt.
         self._build_model()
@@ -466,7 +470,8 @@ class DUETProb(ModelBase):
         self.early_stopping = EarlyStopping(
             patience=config.patience,
             verbose=True,
-            delta=getattr(config, 'early_stopping_delta', 0) # HIER WIRD DER DELTA-WERT ÜBERGEBEN
+            delta=getattr(config, 'early_stopping_delta', 0), # HIER WIRD DER DELTA-WERT ÜBERGEBEN
+            path=model_save_path
         )
 
         # --- NEU: Zeitmessung für Optuna ---
@@ -696,12 +701,12 @@ class DUETProb(ModelBase):
                 avg_train_importance_loss = np.mean(epoch_importance_losses)
                 
                 # --- Gruppe A: Verluste, die für die Optimierung verwendet werden (normalisiert) ---
-                writer.add_scalar("A) Overall Loss (for Optimizer)/Train_Total_Loss (NLL+MoE)", avg_train_total_loss, epoch)
-                writer.add_scalar("A) Overall Loss (for Optimizer)/Train_Normalized_NLL", avg_train_norm_loss, epoch)
-                writer.add_scalar("A) Overall Loss (for Optimizer)/Train_MoE_Importance_Loss", avg_train_importance_loss, epoch)
+                writer.add_scalar("A) Overall Loss (for Optimizer) | Train_Total_Loss (NLL+MoE)", avg_train_total_loss, epoch)
+                writer.add_scalar("A) Overall Loss (for Optimizer) | Train_Normalized_NLL", avg_train_norm_loss, epoch)
+                writer.add_scalar("A) Overall Loss (for Optimizer) | Train_MoE_Importance_Loss", avg_train_importance_loss, epoch)
 
                 # --- Gruppe D: Normalisierter NLL-Vergleich (für Debugging) ---
-                writer.add_scalars("D) Normalized NLL (for Debugging)", {'Train': avg_train_norm_loss}, epoch)
+                writer.add_scalar("D) Normalized NLL (for Debugging) | Train", avg_train_norm_loss, epoch)
 
                 # --- Gruppe C & B: Denormalisierte Trainings-Verluste berechnen und loggen ---
                 if epoch_denorm_losses_per_channel:
@@ -710,13 +715,13 @@ class DUETProb(ModelBase):
                     
                     # Logge den Durchschnitt über alle Kanäle (für Gruppe B)
                     avg_train_loss_all_channels = np.mean(all_train_losses_denorm)
-                    writer.add_scalar("B) Denormalized NLL (Evaluation)/Train_Avg_AllChannels", avg_train_loss_all_channels, epoch)
+                    writer.add_scalar("B) Denormalized NLL (Evaluation) | Train_Avg_AllChannels", avg_train_loss_all_channels, epoch)
 
                     # Logge den Loss pro Kanal (für Gruppe C)
                     avg_train_loss_per_channel = np.mean(all_train_losses_denorm, axis=0)
                     channel_names = list(self.config.channel_bounds.keys())
                     for i, name in enumerate(channel_names):
-                        writer.add_scalars(f"C) Denormalized NLL per Channel/{name}", {'Train': avg_train_loss_per_channel[i]}, epoch)
+                        writer.add_scalar(f"C) Denormalized NLL per Channel | {name} | Train", avg_train_loss_per_channel[i], epoch)
 
                 # --- Mittelung der Experten-Metriken über die Epoche ---
                 # === FIX: Berechne den Durchschnitt aus den laufenden Summen ===
@@ -731,29 +736,29 @@ class DUETProb(ModelBase):
                 
                 # Log Gating-Gewichte
                 if avg_gate_weights_linear is not None:
-                    for i, weight in enumerate(avg_gate_weights_linear):
-                        writer.add_scalar(f"E) Expert Gating (Train)/Weights/Linear_{i}", weight.item(), epoch)
+                    for i, weight in enumerate(avg_gate_weights_linear): # noqa
+                        writer.add_scalar(f"E) Expert Gating (Train) | Weights | Linear_{i}", weight.item(), epoch)
                 if avg_gate_weights_uni_esn is not None:
-                    for i, weight in enumerate(avg_gate_weights_uni_esn):
-                        writer.add_scalar(f"E) Expert Gating (Train)/Weights/ESN_univariate_{i}", weight.item(), epoch)
+                    for i, weight in enumerate(avg_gate_weights_uni_esn): # noqa
+                        writer.add_scalar(f"E) Expert Gating (Train) | Weights | ESN_univariate_{i}", weight.item(), epoch)
                 if avg_gate_weights_multi_esn is not None:
-                    for i, weight in enumerate(avg_gate_weights_multi_esn):
-                        writer.add_scalar(f"E) Expert Gating (Train)/Weights/ESN_multivariate_{i}", weight.item(), epoch)
+                    for i, weight in enumerate(avg_gate_weights_multi_esn): # noqa
+                        writer.add_scalar(f"E) Expert Gating (Train) | Weights | ESN_multivariate_{i}", weight.item(), epoch)
 
                 # Log Selection Counts
                 if avg_selection_counts.numel() > 0:
                     expert_idx = 0
                     # Log linear experts
                     for i in range(config.num_linear_experts):
-                        writer.add_scalar(f"E) Expert Gating (Train)/Selection_Counts/Linear_{i}", avg_selection_counts[expert_idx].item(), epoch)
+                        writer.add_scalar(f"E) Expert Gating (Train) | Selection_Counts | Linear_{i}", avg_selection_counts[expert_idx].item(), epoch)
                         expert_idx += 1
                     # Log univariate ESN experts
                     for i in range(config.num_univariate_esn_experts):
-                        writer.add_scalar(f"E) Expert Gating (Train)/Selection_Counts/ESN_univariate_{i}", avg_selection_counts[expert_idx].item(), epoch)
+                        writer.add_scalar(f"E) Expert Gating (Train) | Selection_Counts | ESN_univariate_{i}", avg_selection_counts[expert_idx].item(), epoch)
                         expert_idx += 1
                     # Log multivariate ESN experts
                     for i in range(config.num_multivariate_esn_experts):
-                        writer.add_scalar(f"E) Expert Gating (Train)/Selection_Counts/ESN_multivariate_{i}", avg_selection_counts[expert_idx].item(), epoch)
+                        writer.add_scalar(f"E) Expert Gating (Train) | Selection_Counts | ESN_multivariate_{i}", avg_selection_counts[expert_idx].item(), epoch)
                         expert_idx += 1
 
                 # --- Mittelung und Logging der Channel-Masken ---
@@ -775,19 +780,19 @@ class DUETProb(ModelBase):
                         dist_stats['scale_std'] = base_distr.scale.std().item()
 
                         # Logge die extrahierten Statistiken nach TensorBoard
-                        writer.add_scalar("F) Distribution Stats (Train)/df_mean", dist_stats['df_mean'], epoch)
-                        writer.add_scalar("F) Distribution Stats (Train)/df_std", dist_stats['df_std'], epoch)
-                        writer.add_scalar("F) Distribution Stats (Train)/loc_mean", dist_stats['loc_mean'], epoch)
-                        writer.add_scalar("F) Distribution Stats (Train)/loc_std", dist_stats['loc_std'], epoch)
-                        writer.add_scalar("F) Distribution Stats (Train)/scale_mean", dist_stats['scale_mean'], epoch)
-                        writer.add_scalar("F) Distribution Stats (Train)/scale_std", dist_stats['scale_std'], epoch)
+                        writer.add_scalar("F) Distribution Stats (Train) | df_mean", dist_stats['df_mean'], epoch)
+                        writer.add_scalar("F) Distribution Stats (Train) | df_std", dist_stats['df_std'], epoch)
+                        writer.add_scalar("F) Distribution Stats (Train) | loc_mean", dist_stats['loc_mean'], epoch)
+                        writer.add_scalar("F) Distribution Stats (Train) | loc_std", dist_stats['loc_std'], epoch)
+                        writer.add_scalar("F) Distribution Stats (Train) | scale_mean", dist_stats['scale_mean'], epoch)
+                        writer.add_scalar("F) Distribution Stats (Train) | scale_std", dist_stats['scale_std'], epoch)
 
                         # NEU: Logge die Skew-Statistiken, falls vorhanden (für SkewedStudentT)
                         if hasattr(base_distr, 'skew'):
                             dist_stats['skew_mean'] = base_distr.skew.mean().item()
                             dist_stats['skew_std'] = base_distr.skew.std().item()
-                            writer.add_scalar("F) Distribution Stats (Train)/skew_mean", dist_stats['skew_mean'], epoch)
-                            writer.add_scalar("F) Distribution Stats (Train)/skew_std", dist_stats['skew_std'], epoch)
+                            writer.add_scalar("F) Distribution Stats (Train) | skew_mean", dist_stats['skew_mean'], epoch)
+                            writer.add_scalar("F) Distribution Stats (Train) | skew_std", dist_stats['skew_std'], epoch)
 
                 metric_for_optimization = float('nan') # Fallback, falls keine Validierung stattfindet
 
@@ -801,7 +806,7 @@ class DUETProb(ModelBase):
                     channel_names = list(self.config.channel_bounds.keys())
                     for i, name in enumerate(channel_names):
                         avg_channel_loss = np.mean(all_window_losses_denorm[:, i])
-                        writer.add_scalars(f"C) Denormalized NLL per Channel/{name}", {'Validation': avg_channel_loss}, epoch)
+                        writer.add_scalar(f"C) Denormalized NLL per Channel | {name} | Validation", avg_channel_loss, epoch)
 
                     # --- NEU: Logik zur Auswahl der Optimierungsmetrik ---
                     # Diese Logik ist jetzt robust: Sie bricht bei einer Fehlkonfiguration ab,
@@ -837,8 +842,8 @@ class DUETProb(ModelBase):
                     overall_cvar_nll = calculate_cvar(all_window_losses_denorm.mean(axis=1), self.config.cvar_alpha)
                     if target_channel and target_channel in channel_names:
                         # In diesem Fall sind die "Optimierungsmetriken" genau die des Zielkanals.
-                        writer.add_scalar(f"Loss_Target_{target_channel}/Validation_Avg_NLL", avg_metric_for_opt, epoch)
-                        writer.add_scalar(f"Loss_Target_{target_channel}/Validation_CVaR_NLL", cvar_metric_for_opt, epoch)
+                        writer.add_scalar(f"Loss_Target_{target_channel} | Validation_Avg_NLL", avg_metric_for_opt, epoch)
+                        writer.add_scalar(f"Loss_Target_{target_channel} | Validation_CVaR_NLL", cvar_metric_for_opt, epoch)
 
 
                     # 2. Wähle die Metrik für die Optimierung basierend auf der Konfiguration.
@@ -850,7 +855,7 @@ class DUETProb(ModelBase):
                         metric_name_for_logging = "Avg NLL"
 
                     # Logge die tatsächlich verwendete Optimierungsmetrik
-                    writer.add_scalar(f"Loss_Optimized/Validation_Metric", metric_for_optimization, epoch)
+                    writer.add_scalar(f"Loss_Optimized | Validation_Metric", metric_for_optimization, epoch)
 
                     # 3. Gib die Metriken in der Konsole aus und hebe die aktive hervor.
                     log_msg = (f"Epoch {epoch + 1} Validation | Overall Avg NLL: {overall_avg_nll:.6f} | "
@@ -893,7 +898,7 @@ class DUETProb(ModelBase):
                                     learned_matrix=avg_p_learned.cpu().numpy(),
                                     final_matrix=avg_p_final.cpu().numpy()
                                 )
-                                writer.add_figure("Channel_Dependencies/Combined_View", fig_dependencies, global_step=epoch)
+                                writer.add_figure("Channel_Dependencies | Combined_View", fig_dependencies, global_step=epoch)
                                 plt.close(fig_dependencies)
 
                     if self.early_stopping.early_stop:
@@ -916,7 +921,7 @@ class DUETProb(ModelBase):
                     print(f"Trial timed out after {(time.time() - start_time):.2f}s (max: {max_training_time}s).")
                     break # Beendet die Epochen-Schleife
                 
-                writer.add_scalar("Misc/Learning_Rate", optimizer.param_groups[0]['lr'], epoch)
+                writer.add_scalar("Misc | Learning_Rate", optimizer.param_groups[0]['lr'], epoch)
                 # NEUER FIX: Erzwinge das Schreiben der TensorBoard-Logs auf die Festplatte am Ende jeder Epoche.
                 writer.flush()
 
@@ -943,22 +948,14 @@ class DUETProb(ModelBase):
                 # === ENDE NEUES LOGGING ===
 
         finally:
-            # Lade den besten Zustand vom EarlyStopping und speichere ihn
-            if self.early_stopping and self.early_stopping.check_point:
-                self.checkpoint_path = os.path.join(config.log_dir, 'best_model.pt')
-                os.makedirs(config.log_dir, exist_ok=True)
-                
-                checkpoint_to_save = {
-                    'model_state_dict': self.early_stopping.check_point,
-                    'config_dict': self.config.__dict__
-                }
-                torch.save(checkpoint_to_save, self.checkpoint_path)
-                print(f"\n--- Finalizing run ---\n>>> Best model saved to {self.checkpoint_path} <<<")
+            print("\n--- Finalizing run: closing writer. ---")
+            # The best model was already saved by EarlyStopping during training.
+            if hasattr(self, "early_stopping") and self.early_stopping.path and os.path.exists(self.early_stopping.path):
+                print(f"\n{'='*20} BEST MODEL AVAILABLE {'='*20}\n>>> Best model was saved to {self.early_stopping.path} <<<\n{'='*58}")
+            else:
+                print("No checkpoint was saved during training.")
             writer.close()
-        
-        # Lade das beste Modell in den Speicher, um es für die Vorhersage zu verwenden
-        if self.checkpoint_path:
-            self.load(self.checkpoint_path)
+
         return self
 
     def _log_epoch_summary_to_file(self, metrics: Dict[str, Any]):
@@ -1042,6 +1039,15 @@ Skew (skew)             : Mean = {metrics['skew_mean']:.4f}, Std = {metrics['ske
     def forecast(self, horizon: int, train: pd.DataFrame) -> np.ndarray:
         if self.model is None:
             raise RuntimeError("Model has not been trained. Call forecast_fit() first.")
+
+        # Load the best model state from the file saved by EarlyStopping
+        if hasattr(self, "early_stopping") and self.early_stopping.path and os.path.exists(self.early_stopping.path):
+            print(f"--- Loading best model for forecast from {self.early_stopping.path} ---")
+            # Use a temporary device variable for clarity
+            device = next(self.model.parameters()).device
+            self.model.load_state_dict(torch.load(self.early_stopping.path, map_location=device))
+        elif self.early_stopping and self.early_stopping.best_score is None:
+            print("WARNING: Forecasting with a model that has not been improved by EarlyStopping.")
             
         input_data = train.iloc[-self.seq_len:, :].values
         input_tensor = torch.from_numpy(input_data).float().unsqueeze(0)
@@ -1066,23 +1072,27 @@ Skew (skew)             : Mean = {metrics['skew_mean']:.4f}, Std = {metrics['ske
         return output_array
 
     def load(self, checkpoint_path: str) -> "ModelBase":
+        """
+        Loads a model's state_dict from a checkpoint file.
+        This method assumes the model architecture has already been initialized.
+        It does NOT load the configuration from the checkpoint.
+        """
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found at: {checkpoint_path}")
         
-        device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+        if self.model is None:
+            raise RuntimeError("Cannot load state_dict into a non-existent model. Please initialize the model first by calling _build_model().")
 
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        # Determine the device from the existing model
+        device = next(self.model.parameters()).device
+        state_dict = torch.load(checkpoint_path, map_location=device)
         
-        # Lade die Konfiguration aus dem Checkpoint, um das Modell neu zu erstellen
-        config_dict = checkpoint['config_dict']
-        self.config = TransformerConfig(**config_dict)
-        
-        self.model = DUETProbModel(self.config)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        # Load the state dictionary into the existing model
+        self.model.load_state_dict(state_dict)
         self.model.to(device)
         self.model.eval()
         
-        print(f"Model successfully loaded from {checkpoint_path}.")
+        print(f"Model state_dict successfully loaded from {checkpoint_path}.")
         return self
 
     def _create_window_plot(self, history, actuals, prediction_dist, channel_name, title):

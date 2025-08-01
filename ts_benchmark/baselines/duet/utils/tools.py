@@ -62,7 +62,7 @@ def adjust_learning_rate(optimizer, epoch, args, verbose=True):
 
 
 class EarlyStopping:
-    def __init__(self, patience=7, verbose=False, delta=0):
+    def __init__(self, patience=7, verbose=False, delta=0, path='checkpoint.pt'):
         """
         Args:
             patience (int): How long to wait after last time validation loss improved.
@@ -72,15 +72,16 @@ class EarlyStopping:
             delta (float):  Minimum change in the monitored quantity to qualify as an improvement.
                             Eine Verbesserung wird nur gezählt, wenn `neuer_loss <= alter_loss - delta`.
                             Default: 0
+            path (str):     Path for the checkpoint to be saved to.
+                            Default: 'checkpoint.pt'
         """
         self.patience = patience
         self.verbose = verbose
         self.counter = 0
-        self.best_score = None
         self.early_stop = False
         self.val_loss_min = np.inf
         self.delta = delta
-        self.check_point = None
+        self.path = path
 
 
     def __call__(self, val_loss, model_state):
@@ -97,39 +98,38 @@ class EarlyStopping:
             return  # Exit the function here to avoid the faulty logic below.
 
         # 2. The remaining logic is only executed for valid, finite loss values.
-        score = -val_loss
-        if self.best_score is None:
-            self.best_score = score
+        # Check if the current loss is a significant improvement.
+        if val_loss < self.val_loss_min - self.delta:
+            # This is an improvement. Save the model and reset the counter.
             self.save_checkpoint(val_loss, model_state)
-        # Die Logik hier ist `score <= self.best_score + self.delta`.
-        # Da score = -loss, ist das äquivalent zu `-val_loss <= -self.val_loss_min + self.delta`,
-        # was umgestellt `self.val_loss_min - val_loss <= self.delta` bedeutet.
-        # Das heißt, wenn die Verbesserung (val_loss_min - val_loss) kleiner oder gleich delta ist,
-        # wird es als KEINE Verbesserung gezählt und der Counter erhöht.
-        elif score <= self.best_score + self.delta:
+            self.counter = 0
+        else:
+            # No significant improvement. Increment the counter.
             self.counter += 1
             if self.verbose:
                 print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
             if self.counter >= self.patience:
                 self.early_stop = True
-        else:
-            self.best_score = score
-            self.save_checkpoint(val_loss, model_state)
-            self.counter = 0
         # --- END OF FIX ---
 
     def save_checkpoint(self, val_loss, model_state):
+        '''Saves model to file when validation loss decreases.'''
         if self.verbose:
             print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
-        
-        # --- DIE KORREKTUR ---
-        # VORHER (falsch): self.check_point = copy.deepcopy(model.state_dict())
-        # NACHHER (korrekt): Die Variable `model_state` IST bereits das state_dict.
-        # Wir müssen es nur noch kopieren.
-        self.check_point = copy.deepcopy(model_state)
-        # --- ENDE KORREKTUR ---
-        
-        self.val_loss_min = val_loss
+
+        try:
+            checkpoint_dir = os.path.dirname(self.path)
+            if checkpoint_dir:
+                os.makedirs(checkpoint_dir, exist_ok=True)
+
+            absolute_path = os.path.abspath(self.path)
+            print(f"---&gt; Attempting to save model to: {absolute_path}")
+            torch.save(model_state, self.path)
+            print(f"---&gt; Model successfully saved.")
+            self.val_loss_min = val_loss
+        except Exception as e:
+            print(f"!!!!!! FAILED TO SAVE MODEL to path: {self.path} !!!!!!")
+            print(f"!!!!!! Error: {e}")
 
 
 class dotdict(dict):

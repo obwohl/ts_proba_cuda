@@ -32,13 +32,13 @@ from ts_benchmark.data.data_source import LocalForecastingDataSource
 # ==============================================================================
 
 # --- 1. ZENTRALE KONFIGURATION ---
-STUDY_NAME = "eisbach_96_studentt_mean_nll_loss_eisbach"
-TRIAL_NUMBERS_TO_PLOT = [153, 180]  # Tragen Sie hier die gewünschten Trial-Nummern ein
+STUDY_NAME = "eisbach_pure_skewedstudentt"
+TRIAL_NUMBERS_TO_PLOT = [0,1]  # Tragen Sie hier die gewünschten Trial-Nummern ein
 
 # --- Pfade und Datenkonfiguration (muss mit optuna_full_search.py übereinstimmen) ---
 BASE_RESULTS_DIR = Path(f"results/optuna_heuristic/{STUDY_NAME}")
-DATA_FILE_PATH = "combo_96.csv"
-TRAIN_RATIO_IN_TV = 0.8 # Das Split-Verhältnis aus dem Training
+DATA_FILE_PATH = "eisbach_pure.csv"
+TRAIN_RATIO_IN_TV = 0.9 # Das Split-Verhältnis aus dem Training
 
 
 def load_model_and_config(trial_path: Path) -> tuple[DUETProbModel | None, TransformerConfig | None]:

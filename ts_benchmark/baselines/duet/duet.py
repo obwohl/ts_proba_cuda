@@ -252,6 +252,9 @@ class DUET(ModelBase):
         writer = SummaryWriter(log_dir)
         print(f"TensorBoard logs will be saved to: {log_dir}")
 
+        # Define the path for the best model checkpoint
+        model_save_path = os.path.join(log_dir, "best_model_checkpoint.pt")
+
         device_ids = np.arange(torch.cuda.device_count()).tolist()
         print(device_ids)
         if len(device_ids) > 1 and self.config.parallel_strategy == "DP":
@@ -318,7 +321,9 @@ class DUET(ModelBase):
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.early_stopping = EarlyStopping(patience=config.patience)
+        self.early_stopping = EarlyStopping(
+            patience=config.patience, verbose=True, path=model_save_path
+        )
         self.model.to(device)
         total_params = sum(
             p.numel() for p in self.model.parameters() if p.requires_grad
@@ -368,7 +373,7 @@ class DUET(ModelBase):
                 if train_ratio_in_tv != 1:
                     valid_loss = self.validate(valid_data_loader, criterion)
                     writer.add_scalar("Loss/validation", valid_loss, epoch)
-                    self.early_stopping(valid_loss, self.model)
+                    self.early_stopping(valid_loss, self.model.state_dict())
                     if scheduler is not None:
                         scheduler.step(valid_loss)
                     if self.early_stopping.early_stop:
@@ -385,14 +390,14 @@ class DUET(ModelBase):
             traceback.print_exc()
             print(f"{'!'*60}\n\n")
         finally:
-            print("\n--- Finalizing run: saving best model checkpoint and closing writer. ---")
-            if self.early_stopping.check_point:
-                model_save_path = os.path.join(log_dir, "best_model_checkpoint.pt")
-                torch.save(self.early_stopping.check_point, model_save_path)
-                print(f"\n{'='*20} MODEL SAVED {'='*20}\n>>> Best model checkpoint saved to {model_save_path} <<<\n{'='*53}")
+            print("\n--- Finalizing run: closing writer. ---")
+            # The best model was already saved by EarlyStopping during training.
+            if hasattr(self, "early_stopping") and os.path.exists(self.early_stopping.path):
+                print(f"\n{'='*20} BEST MODEL AVAILABLE {'='*20}\n>>> Best model was saved to {self.early_stopping.path} <<<\n{'='*58}")
             else:
-                print("No checkpoint available to save.")
+                print("No checkpoint was saved during training.")
             writer.close()
+        return self
 
     def forecast(self, horizon: int, train: pd.DataFrame) -> np.ndarray:
         """
@@ -404,8 +409,11 @@ class DUET(ModelBase):
         """
         from ts_benchmark.utils.data_processing import split_before
 
-        if self.early_stopping.check_point is not None:
-            self.model.load_state_dict(self.early_stopping.check_point)
+        # Load the best model state from the file saved by EarlyStopping
+        if hasattr(self, "early_stopping") and os.path.exists(self.early_stopping.path):
+            self.model.load_state_dict(torch.load(self.early_stopping.path))
+        elif self.early_stopping.best_score is None:
+            print("WARNING: Forecasting with a model that has not been improved by EarlyStopping.")
 
         if self.config.norm:
             train = pd.DataFrame(
@@ -485,8 +493,11 @@ class DUET(ModelBase):
         :param batch_maker: Make batch data used for prediction.
         :return: An array of predicted results.
         """
-        if self.early_stopping.check_point is not None:
-            self.model.load_state_dict(self.early_stopping.check_point)
+        # Load the best model state from the file saved by EarlyStopping
+        if hasattr(self, "early_stopping") and os.path.exists(self.early_stopping.path):
+            self.model.load_state_dict(torch.load(self.early_stopping.path))
+        elif self.early_stopping.best_score is None:
+            print("WARNING: Forecasting with a model that has not been improved by EarlyStopping.")
 
         if self.model is None:
             raise ValueError("Model not trained. Call the fit() function first.")
