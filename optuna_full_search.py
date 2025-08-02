@@ -28,8 +28,8 @@ logging.getLogger("optuna").setLevel(logging.INFO)
 
 # --- 2. Feste Trainingsparameter für die lange, intensive Suche ---
 FIXED_PARAMS = {
-    "data_file": "preci_eisbach.csv", 
-    "horizon": 96,
+    "data_file": "preci_large.csv", 
+    "horizon": 24,
     "train_ratio_in_tv": 0.9, # NEU: Split-Verhältnis explizit gemacht
     # --- NEU: Wähle die zu optimierende Metrik ---
     # 'cvar': Conditional Value at Risk (Durchschnitt der schlechtesten 5% Fehler) -> robustere Modelle
@@ -197,7 +197,7 @@ def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
 
         # 4. Berechne die finalen Metriken auf dem besten Modell
         # Lade das beste Modell und führe eine finale Validierung durch
-        model.model.load_state_dict(torch.load(model.early_stopping.path))
+        model.model.load_state_dict(torch.load(model.early_stopping.path, weights_only=False))
         _, valid_data = train_val_split(data, model_hyper_params["train_ratio_in_tv"], model_hyper_params["seq_len"])
         _, valid_loader = forecasting_data_provider(valid_data, model.config, timeenc=1, batch_size=model.config.batch_size, shuffle=False, drop_last=False)
         device = next(model.model.parameters()).device

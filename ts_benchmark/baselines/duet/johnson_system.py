@@ -94,6 +94,7 @@ def _scipy_to_tensor(func, *args, **kwargs):
     return torch.from_numpy(np.array(result_np, dtype=np.float32)).to(device)
 
 class JohnsonSU_scipy(Distribution):
+    arg_constraints = {} # Added
     # SciPy-based version for icdf
     def __init__(self, gamma, delta, xi, lambda_):
         self.gamma, self.delta, self.xi, self.lambda_ = broadcast_all(gamma, delta, xi, lambda_)
@@ -104,6 +105,7 @@ class JohnsonSU_scipy(Distribution):
         return _scipy_to_tensor(scipy.stats.johnsonsu.ppf, q_reshaped, a=gamma, b=delta, loc=xi, scale=lambda_)
 
 class JohnsonSB_scipy(Distribution):
+    arg_constraints = {} # Added
     # SciPy-based version for icdf
     def __init__(self, gamma, delta, xi, lambda_):
         self.gamma, self.delta, self.xi, self.lambda_ = broadcast_all(gamma, delta, xi, lambda_)
@@ -114,6 +116,7 @@ class JohnsonSB_scipy(Distribution):
         return _scipy_to_tensor(scipy.stats.johnsonsb.ppf, q_reshaped, a=gamma, b=delta, loc=xi, scale=lambda_)
 
 class JohnsonSL_scipy(Distribution):
+    arg_constraints = {} # Added
     # SciPy-based version for icdf
     def __init__(self, delta, xi, lambda_):
         self.delta, self.xi, self.lambda_ = broadcast_all(delta, xi, lambda_)
@@ -124,6 +127,7 @@ class JohnsonSL_scipy(Distribution):
         return _scipy_to_tensor(scipy.stats.lognorm.ppf, q_reshaped, s=delta, loc=xi, scale=lambda_)
 
 class JohnsonSN_scipy(Distribution):
+    arg_constraints = {} # Added
     # SciPy-based version for icdf
     def __init__(self, xi, lambda_):
         self.xi, self.lambda_ = broadcast_all(xi, lambda_)
@@ -134,70 +138,146 @@ class JohnsonSN_scipy(Distribution):
         return _scipy_to_tensor(scipy.stats.norm.ppf, q_reshaped, loc=xi, scale=lambda_)
 
 
-# --- PURE PYTORCH FITTING LOGIC (REPLACES SCIPY.FIT) ---
-
 def _fit_johnson_torch(data_tensor: torch.Tensor, dist_type: str) -> float:
     """
     Performs Maximum Likelihood Estimation for a given Johnson family in pure PyTorch.
     Returns the final Negative Log-Likelihood (NLL).
     """
+    # Use a shared inverse_softplus function
+    def inverse_softplus(x, eps=1e-6):
+        x = x.clamp(min=eps)
+        return torch.log(torch.expm1(x))
+
     if dist_type == 'SU':
         mu, std = data_tensor.mean(), data_tensor.std()
+        if std < 1e-6: return np.inf
+
+        # Stable, simpler initialization
         gamma = nn.Parameter(torch.tensor(0.0, device=data_tensor.device))
-        delta_raw = nn.Parameter(torch.tensor(0.0, device=data_tensor.device))
-        xi = nn.Parameter(mu)
-        lambda_raw = nn.Parameter(torch.log(std))
+        delta_raw = nn.Parameter(inverse_softplus(torch.tensor(1.0)))
+        xi = nn.Parameter(mu.clone().detach())
+        lambda_raw = nn.Parameter(inverse_softplus(std.clone().detach()))
+
         params = [gamma, delta_raw, xi, lambda_raw]
-        optimizer = torch.optim.Adam(params, lr=0.1)
-        for _ in range(150):
+        optimizer = torch.optim.Adam(params, lr=0.01)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=100, factor=0.5, min_lr=1e-6)
+
+        # Early stopping
+        patience = 250
+        min_delta = 1e-5
+        best_nll = float('inf')
+        patience_counter = 0
+        
+        for i in range(5000): # Max iterations
             optimizer.zero_grad()
-            delta, lambda_ = F.softplus(delta_raw) + 1e-6, F.softplus(lambda_raw) + 1e-6
+            delta = F.softplus(delta_raw) + 1e-6
+            lambda_ = F.softplus(lambda_raw) + 1e-6
             dist = JohnsonSU_torch(gamma, delta, xi, lambda_)
-            nll = -dist.log_prob(data_tensor).mean() # Use mean for stable gradients
+            nll = -dist.log_prob(data_tensor).sum()
+
+            if torch.isnan(nll) or torch.isinf(nll): return np.inf
+            
             nll.backward()
             optimizer.step()
-        return nll.item() * len(data_tensor)
+            
+            current_nll = nll.item()
+            scheduler.step(current_nll)
+            
+            if best_nll - current_nll > min_delta:
+                best_nll = current_nll
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                
+            if patience_counter >= patience:
+                print(f"SU early stopping at iteration {i}")
+                break
+        
+        print(f"SU NLL: {best_nll}")
+        return best_nll
 
     elif dist_type == 'SB':
         min_val, max_val = data_tensor.min(), data_tensor.max()
         if not (max_val > min_val): return np.inf
+        
         gamma = nn.Parameter(torch.tensor(0.0, device=data_tensor.device))
-        delta_raw = nn.Parameter(torch.tensor(0.0, device=data_tensor.device))
-        xi = nn.Parameter(min_val - 0.01 * abs(min_val))
-        lambda_ = nn.Parameter(max_val - min_val + 0.02 * abs(min_val))
-        params = [gamma, delta_raw, xi, lambda_]
-        optimizer = torch.optim.Adam(params, lr=0.1)
-        for _ in range(150):
+        delta_raw = nn.Parameter(inverse_softplus(torch.tensor(1.0)))
+        xi = nn.Parameter(min_val - (max_val - min_val) * 0.1)
+        lambda_raw = nn.Parameter(inverse_softplus((max_val - min_val) * 1.2))
+
+        params = [gamma, delta_raw, xi, lambda_raw]
+        optimizer = torch.optim.Adam(params, lr=0.01)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=100, factor=0.5, min_lr=1e-6)
+        
+        # Early stopping
+        patience = 250
+        min_delta = 1e-5
+        best_nll = float('inf')
+        patience_counter = 0
+        
+        for i in range(5000): # Max iterations
             optimizer.zero_grad()
             delta = F.softplus(delta_raw) + 1e-6
-            lambda_clamped = F.softplus(lambda_) + 1e-6
-            dist = JohnsonSB_torch(gamma, delta, xi, lambda_clamped)
-            nll = -dist.log_prob(data_tensor).mean()
+            lambda_ = F.softplus(lambda_raw) + 1e-6
+            dist = JohnsonSB_torch(gamma, delta, xi, lambda_)
+            nll = -dist.log_prob(data_tensor).sum()
+
+            if torch.isnan(nll) or torch.isinf(nll): return np.inf
+                
             nll.backward()
             optimizer.step()
-        return nll.item() * len(data_tensor)
 
-    elif dist_type == 'SL': # LogNormal
+            current_nll = nll.item()
+            scheduler.step(current_nll)
+            
+            if best_nll - current_nll > min_delta:
+                best_nll = current_nll
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                
+            if patience_counter >= patience:
+                print(f"SB early stopping at iteration {i}")
+                break
+        
+        print(f"SB NLL: {best_nll}")
+        return best_nll
+
+    elif dist_type == 'SL':
+        if (data_tensor <= 0).any(): return np.inf
         data_safe = data_tensor[data_tensor > 0]
         if len(data_safe) < 10: return np.inf
+        
         mu_log, std_log = data_safe.log().mean(), data_safe.log().std()
-        # PyTorch LogNormal uses log-space parameters
+        if std_log < 1e-6: return np.inf
+
         loc = nn.Parameter(mu_log)
-        scale = nn.Parameter(std_log)
-        optimizer = torch.optim.Adam([loc, scale], lr=0.1)
-        for _ in range(100):
+        scale_raw = nn.Parameter(inverse_softplus(std_log))
+        optimizer = torch.optim.Adam([loc, scale_raw], lr=0.01)
+        
+        for _ in range(2000):
             optimizer.zero_grad()
-            dist = torch.distributions.LogNormal(loc, F.softplus(scale) + 1e-6)
-            nll = -dist.log_prob(data_safe).mean()
+            dist = torch.distributions.LogNormal(loc, F.softplus(scale_raw) + 1e-6)
+            nll = -dist.log_prob(data_safe).sum()
+
+            if torch.isnan(nll) or torch.isinf(nll): return np.inf
+                
             nll.backward()
             optimizer.step()
-        return nll.item() * len(data_tensor)
+            
+        final_nll = -torch.distributions.LogNormal(loc.detach(), F.softplus(scale_raw.detach()) + 1e-6).log_prob(data_safe).sum()
+        if torch.isnan(final_nll) or torch.isinf(final_nll): return np.inf
 
-    elif dist_type == 'SN': # Normal
+        print(f"SL NLL: {final_nll.item()}")
+        return final_nll.item()
+
+    elif dist_type == 'SN':
         mu, std = data_tensor.mean(), data_tensor.std()
+        if std < 1e-6: return np.inf
         nll = -torch.distributions.Normal(loc=mu, scale=std).log_prob(data_tensor).sum()
+        print(f"SN NLL: {nll.item()}")
         return nll.item()
-    
+
     return np.inf
 
 def get_best_johnson_fit(data: np.ndarray) -> str:
@@ -209,26 +289,43 @@ def get_best_johnson_fit(data: np.ndarray) -> str:
         return 'SU'
 
     data_tensor = torch.from_numpy(data.astype(np.float32))
-    
+    n = len(data_tensor)
+
     nlls = {}
     for dist_type in ['SU', 'SB', 'SL', 'SN']:
         try:
             nlls[dist_type] = _fit_johnson_torch(data_tensor, dist_type)
-        except Exception:
+        except Exception as e:
+            print(f"Error fitting {dist_type}: {e}")
             nlls[dist_type] = np.inf
     
+    print(f"Calculated NLLs: {nlls}")
+
     if not nlls or all(v == np.inf for v in nlls.values()):
         return 'SU' 
 
-    # Find best fit based on lowest NLL
-    best_fit_type = min(nlls, key=nlls.get)
+    # Calculate BIC for each distribution
+    bics = {}
+    param_counts = {'SN': 2, 'SL': 2, 'SU': 4, 'SB': 4} # Corrected SL param count
+
+    for dist_type, nll_val in nlls.items():
+        if nll_val != np.inf:
+            k = param_counts.get(dist_type, 4) # Default to 4 for safety
+            bics[dist_type] = nll_val + k * math.log(n) / 2
+        else:
+            bics[dist_type] = np.inf
+    
+    print(f"Calculated BICs: {bics}")
+
+    # Find best fit based on lowest BIC
+    best_fit_type = min(bics, key=bics.get)
     
     # Heuristic: Prefer simpler Normal distribution if its fit is very close
-    if 'SN' in nlls and nlls['SN'] != np.inf and best_fit_type != 'SN':
-        best_nll = nlls[best_fit_type]
-        norm_nll = nlls['SN']
-        if (norm_nll - best_nll) < 0.05 * abs(best_nll): # If within 5% of the best NLL
-            best_fit_type = 'SN'
+    # if 'SN' in nlls and nlls['SN'] != np.inf and best_fit_type != 'SN':
+    #     best_nll = nlls[best_fit_type]
+    #     norm_nll = nlls['SN']
+    #     if (norm_nll - best_nll) < 0.05 * abs(best_nll): # If within 5% of the best NLL
+    #         best_fit_type = 'SN'
 
     return best_fit_type
 
@@ -250,12 +347,12 @@ class JohnsonOutput:
         lambda_ = F.softplus(lambda_raw.squeeze(-1)) + 1e-6
 
         return CombinedJohnsonDistribution(
-            channel_types=self.channel_types,
+            channel_types=self.channel_types, # FIX: Pass self.channel_types
             gamma=gamma, delta=delta, xi=xi, lambda_=lambda_
         )
 
 class CombinedJohnsonDistribution(Distribution):
-    arg_constraints = {}
+    arg_constraints = {} # Added
 
     def __init__(self, channel_types, gamma, delta, xi, lambda_, validate_args=None):
         self.channel_types = channel_types
@@ -291,16 +388,22 @@ class CombinedJohnsonDistribution(Distribution):
 
         if self.sl_mask.any():
             indices = self.sl_mask.nonzero(as_tuple=True)[0]
-            # Use PyTorch's built-in LogNormal
-            # Note: PyTorch's LogNormal is parametrized by log-space mean and std.
-            # We map our parameters to it. This is an approximation. `xi` becomes loc, `lambda_` becomes scale.
-            # `delta` is used as the shape parameter 's', which is non-standard for PyTorch's LogNormal.
-            # A more direct mapping would require re-deriving log_prob for this specific parametrization.
-            # For simplicity, we use the standard PyTorch LogNormal which is parametrized differently.
-            # A simple mapping: loc=log(xi), scale=log(lambda_) might work better.
-            # Let's use the most basic form:
+            # For LogNormal, values must be strictly positive. Handle out-of-support values.
+            sl_value = value[:, indices, :]
+            # Create a mask for values that are <= 0
+            out_of_support_mask = sl_value <= 0
+
+            # Calculate log_prob only for in-support values
+            # Clamp values to a small positive number to avoid log(0) or log(negative) for in-support calculation
+            # This is for numerical stability during calculation, actual out-of-support values will be set to -inf
+            # Removed +1e-9 from here, as it was causing issues with _validate_sample
+            sl_value_clamped = torch.clamp(sl_value, min=1e-9)
+
             dist = torch.distributions.LogNormal(self.xi[:, indices, :], self.lambda_[:, indices, :])
-            log_p[:, indices, :] = dist.log_prob(value[:, indices, :] + 1e-9) # Add epsilon for stability at zero
+            log_p_sl = dist.log_prob(sl_value_clamped)
+            
+            # Set log_prob to -inf for out-of-support values
+            log_p[:, indices, :] = torch.where(out_of_support_mask, torch.full_like(log_p_sl, -float('inf')), log_p_sl)
 
         if self.sn_mask.any():
             indices = self.sn_mask.nonzero(as_tuple=True)[0]
