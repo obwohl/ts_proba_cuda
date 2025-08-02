@@ -56,4 +56,9 @@ def create_experts(config) -> nn.ModuleList:
     for _ in range(num_multi_esn):
         experts.append(MultivariateReservoirExpert(config))
 
+    # 4. Wende die Initialisierung auf ALLE erstellten Experten an
+    # Dies ist der entscheidende Fix, um die Symmetrie zu brechen.
+    for expert in experts:
+        expert.reset_parameters()
+
     return experts

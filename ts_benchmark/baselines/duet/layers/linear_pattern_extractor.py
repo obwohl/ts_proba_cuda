@@ -70,6 +70,20 @@ class Linear_extractor(nn.Module):
         return self.encoder(x_enc)
 
 
+    def reset_parameters(self):
+        """
+        Initialisiert die Gewichte der linearen Schichten neu.
+        Dies durchbricht die Symmetrie, die durch die deterministische
+        Initialisierung im Konstruktor entsteht.
+        """
+        if self.individual:
+            for i in range(self.channels):
+                self.Linear_Seasonal[i].reset_parameters()
+                self.Linear_Trend[i].reset_parameters()
+        else:
+            self.Linear_Seasonal.reset_parameters()
+            self.Linear_Trend.reset_parameters()
+
     def forward(self, x_enc):
         if x_enc.shape[0] == 0:
             return torch.empty((0, self.pred_len, self.enc_in)).to(x_enc.device)
