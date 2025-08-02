@@ -7,9 +7,8 @@ import sys
 import uuid
 import signal
 
-
 # -- Studien-Konfiguration --
-STUDY_NAME = "preci"
+STUDY_NAME = "preci_short"
 STORAGE_NAME = "sqlite:///optuna_study.db"  # Fester DB-Name. Studien werden intern durch STUDY_NAME unterschieden.
 
 # -- Parallelisierungs-Konfiguration --
@@ -37,11 +36,17 @@ def prepare_study(study_name, storage_name, num_parallel_workers, warm_start_stu
     print(f"Vorbereiten der Optuna-Studie '{study_name}'...")
     print("==================================================")
 
+    try:
+        optuna.delete_study(study_name=study_name, storage=storage_name)
+        print(f"INFO: Vorhandene Studie '{study_name}' wurde gelöscht.")
+    except:
+        pass # Study didn't exist, which is fine.
+
     study = optuna.create_study(
         study_name=study_name,
         storage=storage_name,
         direction="minimize",
-        load_if_exists=True,
+        load_if_exists=False, # Should be False now
     )
 
     # --- ROBUSTER FIX GEGEN RACE CONDITIONS ---

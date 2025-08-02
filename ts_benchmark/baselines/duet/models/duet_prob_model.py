@@ -111,6 +111,7 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
 
         # --- Kernkomponenten von DUET (bleiben erhalten) ---
         self.cluster = Linear_extractor_cluster(config)
+        self.expert_embedding_dim = config.expert_embedding_dim
         self.CI = config.CI
         self.n_vars = config.enc_in
         self.d_model = config.d_model
@@ -183,15 +184,33 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
     def forward(self, input_x: torch.Tensor):
         # input_x: [Batch, SeqLen, NVars]
         
+        # --- NEW DIAGNOSTIC LOGGING ---
+        if self.training: # Only log during training
+            print(f"\n[DIAGNOSTIC LOG | DUETProbModel] Before RevIN:")
+            print(f"  input_x mean: {input_x.mean().item():.6f}, std: {input_x.std().item():.6f}")
+            print(f"  input_x min: {input_x.min().item():.6f}, max: {input_x.max().item():.6f}")
+            print(f"  input_x has nan: {torch.isnan(input_x).any().item()}")
+        # --- END NEW DIAGNOSTIC LOGGING ---
+
         x_for_main_model, stats = self.cluster.revin(input_x, 'norm')
+
+        # --- NEW DIAGNOSTIC LOGGING ---
+        if self.training: # Only log during training
+            print(f"\n[DIAGNOSTIC LOG | DUETProbModel] After RevIN (before nan_to_num):")
+            print(f"  x_for_main_model mean: {x_for_main_model.mean().item():.6f}, std: {x_for_main_model.std().item():.6f}")
+            print(f"  x_for_main_model min: {x_for_main_model.min().item():.6f}, max: {x_for_main_model.max().item():.6f}")
+            print(f"  x_for_main_model has nan: {torch.isnan(x_for_main_model).any().item()}")
+        # --- END NEW DIAGNOSTIC LOGGING ---
+
         x_for_main_model = torch.nan_to_num(x_for_main_model)
 
-        if self.CI:
-            channel_independent_input = rearrange(x_for_main_model, 'b l n -> (b n) l 1')
-            reshaped_output, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts = self.cluster(channel_independent_input)
-            temporal_feature = rearrange(reshaped_output, '(b n) d 1 -> b d n', b=input_x.shape[0])
-        else:
-            temporal_feature, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts = self.cluster(x_for_main_model)
+        # --- NEW DIAGNOSTIC LOGGING ---
+        if self.training: # Only log during training
+            print(f"\n[DIAGNOSTIC LOG | DUETProbModel] After RevIN (after nan_to_num):")
+            print(f"  x_for_main_model mean: {x_for_main_model.mean().item():.6f}, std: {x_for_main_model.std().item():.6f}")
+        # --- END NEW DIAGNOSTIC LOGGING ---
+
+        temporal_feature, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, clean_logits, noisy_logits = self.cluster(x_for_main_model)
 
         temporal_feature = rearrange(temporal_feature, 'b d n -> b n d')
         
@@ -210,12 +229,20 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
                 p_learned = torch.ones(input_x.shape[0], 1, 1, device=input_x.device)
                 p_final = torch.ones(input_x.shape[0], 1, 1, device=input_x.device)
 
+
         distr_params_list = []
         for i, name in enumerate(self.channel_names):
             channel_feature = channel_group_feature[:, i, :]
-            flat_params = self.projection_heads[name](channel_feature)
+            raw_params = self.projection_heads[name](channel_feature)
+
+            # NEU: Stabilisierung der Ausgabe mit tanh an der korrekten Stelle.
+            # Dies quetscht die Parameter in den stabilen Bereich [-1, 1] und
+            # verhindert die numerische Instabilität in der Johnson-Verteilung.
+            flat_params = torch.tanh(raw_params)
+            
             reshaped_params = rearrange(flat_params, 'b (h p) -> b h p', h=self.horizon, p=self.distr_output.args_dim)
             distr_params_list.append(reshaped_params)
+
 
         distr_params = torch.stack(distr_params_list, dim=1)
         distr_params = torch.nan_to_num(distr_params, nan=0.0, posinf=1e4, neginf=-1e4)
@@ -223,7 +250,7 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
         base_distr = self.distr_output.distribution(distr_params)
         final_distr = DenormalizingDistribution(base_distr, stats)
 
-        return final_distr, base_distr, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, p_learned, p_final
+        return final_distr, base_distr, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, p_learned, p_final, clean_logits, noisy_logits
 
     def get_parameter_groups(self):
         """

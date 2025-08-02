@@ -14,36 +14,44 @@ class Linear_extractor(nn.Module):
         """
         super(Linear_extractor, self).__init__()
         self.seq_len = configs.seq_len
-
         self.pred_len = configs.d_model
         self.decompsition = series_decomp(configs.moving_avg)
         self.individual = individual
         self.channels = configs.enc_in
         self.enc_in = 1 if configs.CI else configs.enc_in
+
         if self.individual:
             self.Linear_Seasonal = nn.ModuleList()
             self.Linear_Trend = nn.ModuleList()
-
             for i in range(self.channels):
-                self.Linear_Seasonal.append(
-                    nn.Linear(self.seq_len, self.pred_len))
-                self.Linear_Trend.append(
-                    nn.Linear(self.seq_len, self.pred_len))
-
-                self.Linear_Seasonal[i].weight = nn.Parameter(
-                    (1 / self.seq_len) * torch.ones([self.pred_len, self.seq_len]))
-                self.Linear_Trend[i].weight = nn.Parameter(
-                    (1 / self.seq_len) * torch.ones([self.pred_len, self.seq_len]))
+                self.Linear_Seasonal.append(nn.Linear(self.seq_len, self.pred_len))
+                self.Linear_Trend.append(nn.Linear(self.seq_len, self.pred_len))
         else:
             self.Linear_Seasonal = nn.Linear(self.seq_len, self.pred_len)
             self.Linear_Trend = nn.Linear(self.seq_len, self.pred_len)
 
-            self.Linear_Seasonal.weight = nn.Parameter(
-                (1 / self.seq_len) * torch.ones([self.pred_len, self.seq_len]))
-            self.Linear_Trend.weight = nn.Parameter(
-                (1 / self.seq_len) * torch.ones([self.pred_len, self.seq_len]))
+    def reset_parameters(self, expert_index: int = 0):
+        """
+        Initialisiert die Gewichte der linearen Schichten neu.
+        Dies ersetzt die fehlerhafte Zuweisung im Konstruktor.
+        """
+        if self.individual:
+            for i in range(self.channels):
+                self._reset_linear_layer(self.Linear_Seasonal[i], expert_index)
+                self._reset_linear_layer(self.Linear_Trend[i], expert_index)
+        else:
+            self._reset_linear_layer(self.Linear_Seasonal, expert_index)
+            self._reset_linear_layer(self.Linear_Trend, expert_index)
 
-
+    def _reset_linear_layer(self, layer: nn.Linear, expert_index: int):
+        """Setzt eine einzelne lineare Schicht auf den gewünschten Zustand zurück."""
+        with torch.no_grad():
+            # 1. Wende die ursprünglich beabsichtigte Initialisierung an
+            layer.weight.fill_(1 / self.seq_len)
+            # 2. Füge die deterministische Störung hinzu, um die Symmetrie zu brechen
+            layer.weight[0, 0] += 0.001 * expert_index
+            if layer.bias is not None:
+                layer.bias.zero_()
 
     def encoder(self, x):
         seasonal_init, trend_init = self.decompsition(x)
@@ -68,21 +76,6 @@ class Linear_extractor(nn.Module):
     def forecast(self, x_enc):
         # Encoder
         return self.encoder(x_enc)
-
-
-    def reset_parameters(self):
-        """
-        Initialisiert die Gewichte der linearen Schichten neu.
-        Dies durchbricht die Symmetrie, die durch die deterministische
-        Initialisierung im Konstruktor entsteht.
-        """
-        if self.individual:
-            for i in range(self.channels):
-                self.Linear_Seasonal[i].reset_parameters()
-                self.Linear_Trend[i].reset_parameters()
-        else:
-            self.Linear_Seasonal.reset_parameters()
-            self.Linear_Trend.reset_parameters()
 
     def forward(self, x_enc):
         if x_enc.shape[0] == 0:

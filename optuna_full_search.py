@@ -16,6 +16,18 @@ from ts_benchmark.baselines.duet.duet_prob import DUETProb, calculate_cvar
 from ts_benchmark.data.data_source import LocalForecastingDataSource
 from ts_benchmark.baselines.utils import forecasting_data_provider, train_val_split
 
+
+# === ADD THIS CODE BLOCK GLOBALLY ===
+# This overwrites the PyTorch function that checks for MPS availability.
+# All subsequent calls to torch.backends.mps.is_available() in your code
+# will now return False, forcing the fallback to CPU.
+print("--- [DIAGNOSTIC OVERRIDE] ---")
+print("Patching torch.backends.mps.is_available() to return False.")
+print("The script will now run on CPU.")
+print("-----------------------------")
+torch.backends.mps.is_available = lambda: False
+# ===================================
+
 # --- FIX: "Too many open files" Error ---
 # Ändert die Strategie, wie Worker-Prozesse Daten teilen.
 # 'file_system' ist robuster für langlaufende Experimente als der Standard 'file_descriptor'.
@@ -28,7 +40,7 @@ logging.getLogger("optuna").setLevel(logging.INFO)
 
 # --- 2. Feste Trainingsparameter für die lange, intensive Suche ---
 FIXED_PARAMS = {
-    "data_file": "preci_large.csv", 
+    "data_file": "preci_short.csv", 
     "horizon": 24,
     "train_ratio_in_tv": 0.9, # NEU: Split-Verhältnis explizit gemacht
     # --- NEU: Wähle die zu optimierende Metrik ---
@@ -54,7 +66,7 @@ FIXED_PARAMS = {
     # NEU: Hartes Speicherlimit in Gigabyte für MPS-Geräte. Auf `None` setzen, um zu deaktivieren.
     "cvar_alpha": 0.05, # Wir wollen den mittleren Fehler der 5% schlechtesten Fälle optimieren
     "max_memory_gb": None,
-    "profile_epoch": None,
+    "profile_epoch": 0,
     # NEU: Schalter zum Deaktivieren der speicherintensiven Plots während der Optuna-Suche.
     "enable_diagnostic_plots": False,
     # "channel_adjacency_prior": [ isarpegel
@@ -75,7 +87,7 @@ FIXED_PARAMS = {
 def get_suggested_params(trial: optuna.Trial) -> dict:
     """Schlägt einen Satz von Hyperparametern vor."""
     params = {}
-    params["seq_len"] = trial.suggest_categorical("seq_len", [96, 192, 384, 480])
+    params["seq_len"] = trial.suggest_categorical("seq_len", [48, 96, 192, 384, 480])
     params["norm_mode"] = trial.suggest_categorical("norm_mode", ["subtract_last", "subtract_median"])
     params["lr"] = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
     params["d_model"] = trial.suggest_categorical("d_model", [32, 64, 128, 256])

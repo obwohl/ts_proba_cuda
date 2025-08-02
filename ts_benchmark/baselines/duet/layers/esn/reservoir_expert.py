@@ -86,9 +86,12 @@ class BaseReservoirExpert(nn.Module, ABC):
         h = _compiled_esn_loop(x, h, self.W_res, W_in, self.leak_rate)
         return h
 
-    def reset_parameters(self):
+    def reset_parameters(self, expert_index: int = 0):
         """Initialisiert die Reservoir-Matrix neu."""
         self._create_reservoir_matrix()
+        # Füge eine kleine, deterministische Störung hinzu, um die Symmetrie zu brechen
+        with torch.no_grad():
+            self.W_res[0, 0] += 0.001 * expert_index
 
     @abstractmethod
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -112,7 +115,7 @@ class UnivariateReservoirExpert(BaseReservoirExpert):
         )
 
         self.in_features = 1
-        self.input_scaling = getattr(config, 'input_scaling', 1.0)
+        self.input_scaling = getattr(config, 'input_scaling_uni', 1.0)
 
         # Spezifische Eingabegewichte für den univariaten Fall
         W_in = torch.randn(self.reservoir_size, self.in_features) * self.input_scaling
@@ -121,17 +124,19 @@ class UnivariateReservoirExpert(BaseReservoirExpert):
         # Spezifische, einfache Ausgabeschicht
         self.readout = nn.Linear(self.reservoir_size, self.d_model)
 
-    def reset_parameters(self):
+    def reset_parameters(self, expert_index: int = 0):
         """
         Initialisiert alle Gewichte dieses Experten neu:
         1. Ruft reset_parameters der Basisklasse auf, um W_res neu zu erstellen.
         2. Erstellt die Eingabematrix W_in neu.
         3. Initialisiert den trainierbaren Readout-Layer neu.
         """
-        super().reset_parameters() # Initialisiert W_res neu
+        super().reset_parameters(expert_index=expert_index) # Initialisiert W_res neu
         W_in = torch.randn(self.reservoir_size, self.in_features) * self.input_scaling
         self.register_buffer('W_in', W_in)
         self.readout.reset_parameters()
+        with torch.no_grad():
+            self.readout.weight[0, 0] += 0.001 * expert_index
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -178,17 +183,19 @@ class MultivariateReservoirExpert(BaseReservoirExpert):
         # Spezifische "Structured Readout"-Ausgabeschicht
         self.readout = nn.Linear(self.reservoir_size, self.d_model * self.n_vars)
 
-    def reset_parameters(self):
+    def reset_parameters(self, expert_index: int = 0):
         """
         Initialisiert alle Gewichte dieses Experten neu:
         1. Ruft reset_parameters der Basisklasse auf, um W_res neu zu erstellen.
         2. Erstellt die Eingabematrix W_in neu.
         3. Initialisiert den trainierbaren Readout-Layer neu.
         """
-        super().reset_parameters() # Initialisiert W_res neu
+        super().reset_parameters(expert_index=expert_index) # Initialisiert W_res neu
         W_in = torch.randn(self.reservoir_size, self.in_features) * self.input_scaling
         self.register_buffer('W_in', W_in)
         self.readout.reset_parameters()
+        with torch.no_grad():
+            self.readout.weight[0, 0] += 0.001 * expert_index
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

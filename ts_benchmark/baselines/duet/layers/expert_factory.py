@@ -1,33 +1,29 @@
+import torch
 import torch.nn as nn
 from copy import deepcopy
 import warnings
+import time
+import os
+import hashlib
 
 # Importiere die beiden Experten-Typen, die wir erstellen können
 from .linear_pattern_extractor import Linear_extractor
 from .esn.reservoir_expert import UnivariateReservoirExpert, MultivariateReservoirExpert
 
+def _get_tensor_signature(tensor: torch.Tensor) -> str:
+    """Erstellt eine kompakte, aber aussagekräftige Signatur für einen Tensor."""
+    tensor_bytes = tensor.cpu().numpy().tobytes()
+    hash_sig = hashlib.sha256(tensor_bytes).hexdigest()[:10] # Kurzer Hash
+    stats_sig = f"μ={tensor.mean():.4f}, σ={tensor.std():.4f}, min={tensor.min():.4f}, max={tensor.max():.4f}"
+    probe_sig = f"{tensor.view(-1)[0].item():.6f}"
+    return f"Hash: {hash_sig} | Stats: ({stats_sig}) | Probe[0]: {probe_sig}"
 
 def create_experts(config) -> nn.ModuleList:
     """
     Erstellt eine `nn.ModuleList` mit einer Mischung aus linearen und ESN-Experten.
-
-    Diese Fabrik-Funktion liest die Konfiguration, um die Anzahl und die spezifischen
-    Parameter für jeden Expertentyp zu bestimmen.
-
-    Args:
-        config: Das Konfigurationsobjekt, das die folgenden Attribute enthalten muss:
-                - num_linear_experts (int): Anzahl der linearen Experten.
-                - num_univariate_esn_experts (int): Anzahl der univariaten ESN-Experten.
-                - num_multivariate_esn_experts (int): Anzahl der multivariaten ESN-Experten.
-
-                Veraltete Parameter (werden ignoriert, wenn neue vorhanden sind):
-                - num_esn_experts (int): Wird ignoriert, wenn die neuen Parameter gesetzt sind.
-                - esn_configs (list): Wird derzeit nicht für die neue hybride Architektur verwendet.
-
-    Returns:
-        nn.ModuleList: Eine Liste, die die instanziierten Experten-Module enthält.
     """
     experts = nn.ModuleList()
+    print("[DIAGNOSTIC LOG] Starting expert creation...")
 
     # 1. Erstelle die linearen Experten
     for _ in range(getattr(config, 'num_linear_experts', 0)):
@@ -57,8 +53,20 @@ def create_experts(config) -> nn.ModuleList:
         experts.append(MultivariateReservoirExpert(config))
 
     # 4. Wende die Initialisierung auf ALLE erstellten Experten an
-    # Dies ist der entscheidende Fix, um die Symmetrie zu brechen.
-    for expert in experts:
-        expert.reset_parameters()
+    torch.manual_seed(int(time.time() * 1000) + os.getpid())
+    
+    print("\n[DIAGNOSTIC LOG | POINT A] After creation and before reset_parameters:")
+    for i, expert in enumerate(experts):
+        # Logge die Signatur des ersten Parameters jedes Experten
+        first_param = next(expert.parameters(), None)
+        if first_param is not None:
+            print(f"  Expert {i} ({expert.__class__.__name__}): {_get_tensor_signature(first_param.data)}")
+        expert.reset_parameters(expert_index=i)
+
+    print("\n[DIAGNOSTIC LOG | POINT A] After reset_parameters:")
+    for i, expert in enumerate(experts):
+        first_param = next(expert.parameters(), None)
+        if first_param is not None:
+            print(f"  Expert {i} ({expert.__class__.__name__}): {_get_tensor_signature(first_param.data)}")
 
     return experts
