@@ -33,7 +33,7 @@ def _get_tensor_signature(tensor: torch.Tensor) -> str:
     hash_sig = hashlib.sha256(tensor_bytes).hexdigest()[:10] # Kurzer Hash
     stats_sig = f"μ={tensor.mean():.4f}, σ={tensor.std():.4f}, min={tensor.min():.4f}, max={tensor.max():.4f}"
     probe_sig = f"{tensor.view(-1)[0].item():.6f}"
-    return f"Hash: {hash_sig} | Stats: ({stats_sig}) | Probe[0]: {probe_sig}"''
+    return f"Hash: {hash_sig} | Stats: ({stats_sig}) | Probe[0]: {probe_sig}"
 
 WINDOW_SEARCH_CACHE = {}
 
@@ -131,6 +131,9 @@ class TransformerConfig:
             "quantiles": [0.1, 0.5, 0.9],
             "norm_mode": "subtract_median",
 
+            # --- NEW: Probabilistic Modelling ---
+            "distribution_family": "Johnson",
+
             # --- NEW: Projection Head Configuration ---
             "projection_head_layers": 0,
             "projection_head_dim_factor": 2,
@@ -182,7 +185,7 @@ class DUETProb(ModelBase):
         
     @property
     def model_name(self) -> str:
-        return "DUET-Prob-Johnson-v1"
+        return f"DUET-Prob-{self.config.distribution_family}-v1"
 
     @staticmethod
     def required_hyper_params() -> dict:
@@ -224,16 +227,25 @@ class DUETProb(ModelBase):
         column_num = train_valid_data.shape[1]
         self.config.enc_in = self.config.dec_in = self.config.c_out = column_num
 
-        # --- NEU: Bestimmung des Johnson-Verteilungstyps pro Kanal ---
+        # --- Bestimmung der Verteilungs-spezifischen Konfiguration ---
         train_data_for_fit, _ = train_val_split(train_valid_data, 0.9, self.config.seq_len)
-        channel_types = []
-        print("--- Analyzing data distribution to select Johnson system type for each channel... ---")
-        for col_name in train_data_for_fit.columns:
-            best_fit = get_best_johnson_fit(train_data_for_fit[col_name].values)
-            channel_types.append(best_fit)
-            print(f"  -> Channel '{col_name}': Best fit is Johnson {best_fit}")
-        setattr(self.config, 'johnson_channel_types', channel_types)
-        print("--- Johnson system analysis complete. ---\n")
+
+        if self.config.distribution_family == "Johnson":
+            print("--- Analyzing data distribution to select Johnson system type for each channel... ---")
+            channel_types = []
+            for col_name in train_data_for_fit.columns:
+                best_fit = get_best_johnson_fit(train_data_for_fit[col_name].values)
+                channel_types.append(best_fit)
+                print(f"  -> Channel '{col_name}': Best fit is Johnson {best_fit}")
+            setattr(self.config, 'channel_types', channel_types)
+            print("--- Johnson system analysis complete. ---\n")
+        elif self.config.distribution_family == "ZIEGPD_M1":
+            print("--- Using ZIEGPD_M1 distribution family for all channels. ---")
+            channel_types = ["ZIEGPD_M1"] * column_num
+            setattr(self.config, 'channel_types', channel_types)
+            print("--- ZIEGPD_M1 setup complete. ---\n")
+        else:
+            raise ValueError(f"Unknown distribution_family: {self.config.distribution_family}")
 
         # --- Berechnung der Verteilungsgrenzen (wird für Johnson SB benötigt) ---
         channel_bounds = {}
@@ -298,7 +310,7 @@ class DUETProb(ModelBase):
                     input_data = input_sample_tensor.float().unsqueeze(0).to(device)
                     actuals_data = actuals_data_tensor.float().unsqueeze(0).to(device)
                     
-                    denorm_distr, _, _, _, _, _, _, _, _ = self.model(input_data)
+                    denorm_distr, _, _, _, _, _, _, _, _, _, _ = self.model(input_data)
 
                     nll_per_point = -denorm_distr.log_prob(actuals_data)
                             
@@ -478,19 +490,24 @@ class DUETProb(ModelBase):
                         
                         denorm_distr, base_distr, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, batch_selection_counts, p_learned, p_final, clean_logits, noisy_logits = self.model(input_data)
                         
-
                         target_horizon = target[:, -config.horizon:, :]
-                        
-                        norm_target = denorm_distr.normalize_value(target_horizon).permute(0, 2, 1)
 
-                        log_probs = base_distr.log_prob(norm_target)
+                        if self.config.distribution_family == "Johnson":
+                            # For Johnson, loss is on the normalized distribution
+                            norm_target = denorm_distr.normalize_value(target_horizon).permute(0, 2, 1)
+                            log_probs = base_distr.log_prob(norm_target)
+                            nll_loss = -log_probs.mean()
+                        else:
+                            # For ZIEGPD, loss is on the final (denormalized) distribution
+                            log_probs = denorm_distr.log_prob(target_horizon)
+                            nll_loss = -log_probs.mean()
+
                         log_probs = torch.clamp(log_probs, min=-1e8)
 
-                        normalized_loss = -log_probs.mean()
-
-                        total_loss = normalized_loss + config.loss_coef * loss_importance
+                        total_loss = nll_loss + config.loss_coef * loss_importance
 
                         with torch.no_grad():
+                            # This loss is always on the final, potentially denormalized distribution
                             denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
                             epoch_denorm_losses_per_channel.append(denorm_loss_per_sample.cpu().numpy())
 
@@ -501,19 +518,12 @@ class DUETProb(ModelBase):
                             if config.use_agc:
                                 adaptive_clip_grad_(self.model.parameters(), clip_factor=config.agc_lambda)
                             else:
-
                                 torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=1.0)
-
-
-
 
                             optimizer.step()
                             optimizer.zero_grad()
                             
-                                
-                        
-                        epoch_total_losses.append(total_loss.item())                        
-                        epoch_normalized_losses.append(normalized_loss.item())
+                        epoch_total_losses.append(total_loss.item())
                         epoch_importance_losses.append(loss_importance.item())
 
                         if sum_gate_weights_linear is not None and batch_gate_weights_linear.numel() > 0:
@@ -534,7 +544,7 @@ class DUETProb(ModelBase):
                             prof.step()
 
                         epoch_total_loss_sum += total_loss.item()
-                        epoch_norm_loss_sum += normalized_loss.item()
+                        epoch_norm_loss_sum += nll_loss.item()
 
                         if (i + 1) % config.tqdm_update_freq == 0 or (i + 1) == len(train_data_loader):
                             avg_epoch_loss = epoch_total_loss_sum / (i + 1)
@@ -573,10 +583,8 @@ class DUETProb(ModelBase):
                 avg_train_importance_loss = np.mean(epoch_importance_losses)
                 
                 writer.add_scalar("A) Overall Loss (for Optimizer) | Train_Total_Loss (NLL+MoE)", avg_train_total_loss, epoch)
-                writer.add_scalar("A) Overall Loss (for Optimizer) | Train_Normalized_NLL", avg_train_norm_loss, epoch)
+                writer.add_scalar("A) Overall Loss (for Optimizer) | Train_NLL", avg_train_norm_loss, epoch)
                 writer.add_scalar("A) Overall Loss (for Optimizer) | Train_MoE_Importance_Loss", avg_train_importance_loss, epoch)
-
-                writer.add_scalar("D) Normalized NLL (for Debugging) | Train", avg_train_norm_loss, epoch)
 
                 if epoch_denorm_losses_per_channel:
                     all_train_losses_denorm = np.concatenate(epoch_denorm_losses_per_channel, axis=0)
@@ -628,7 +636,7 @@ class DUETProb(ModelBase):
                 metric_for_optimization = float('nan')
 
                 if valid_data_loader is not None:
-                    all_window_losses_denorm, all_window_losses_norm = self.validate(valid_data_loader, writer, epoch, device, desc=f"Epoch {epoch+1} Validation")
+                    all_window_losses_denorm, _ = self.validate(valid_data_loader, writer, epoch, device, desc=f"Epoch {epoch+1} Validation")
                     
                     channel_names = list(self.config.channel_bounds.keys())
                     for i, name in enumerate(channel_names):
@@ -768,7 +776,7 @@ Train Loss (Total)      : {metrics['train_loss_total']:.6f}
 Validation Metric       : {metrics['validation_metric']:.6f}  (Lower is better)
 
 --- Loss Components (Train) ---
-Normalized NLL          : {metrics['train_loss_norm']:.6f}  (Main objective)
+NLL                     : {metrics['train_loss_norm']:.6f}  (Main objective)
 Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
 """
         with open(log_file_path, 'a') as f:
@@ -794,11 +802,16 @@ Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
 
                 denorm_distr, base_distr, _, _, _, _, _, _, _, _, _ = self.model(input_data)
                 
-                denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
-                all_denorm_losses.append(denorm_loss_per_sample.cpu().numpy())
+                if self.config.distribution_family == "Johnson":
+                    denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
+                    norm_target = denorm_distr.normalize_value(target_horizon).permute(0, 2, 1)
+                    norm_loss_per_sample = -base_distr.log_prob(norm_target).mean(dim=2)
+                else:
+                    # For ZIEGPD, both losses are the same, calculated on the final distribution
+                    denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
+                    norm_loss_per_sample = denorm_loss_per_sample # Or recalculate, but this is efficient
 
-                norm_target = denorm_distr.normalize_value(target_horizon).permute(0, 2, 1)
-                norm_loss_per_sample = -base_distr.log_prob(norm_target).mean(dim=2)
+                all_denorm_losses.append(denorm_loss_per_sample.cpu().numpy())
                 all_norm_losses.append(norm_loss_per_sample.cpu().numpy())
 
                 if all_denorm_losses:
@@ -830,7 +843,7 @@ Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
         
         self.model.eval()
         with torch.no_grad():
-            distr, _, _, _, _, _, _, _, _ = self.model(input_tensor)
+            distr, _, _, _, _, _, _, _, _, _, _ = self.model(input_tensor)
             
             q_list = self.config.quantiles
             q_tensor = torch.tensor(q_list, device=device, dtype=torch.float32)
@@ -886,7 +899,7 @@ Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
         
         quantiles = self.config.quantiles
         device = prediction_dist.mean.device
-        q_tensor = torch.tensor(q_list, device=device, dtype=torch.float32)
+        q_tensor = torch.tensor(quantiles, device=device, dtype=torch.float32)
 
         quantile_preds_full = prediction_dist.icdf(q_tensor).squeeze(0).cpu().numpy()
         

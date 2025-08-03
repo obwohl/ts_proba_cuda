@@ -5,6 +5,7 @@ from einops import rearrange
 from ts_benchmark.baselines.duet.layers.linear_extractor_cluster import Linear_extractor_cluster
 from ts_benchmark.baselines.duet.utils.masked_attention import Mahalanobis_mask, Encoder, EncoderLayer, FullAttention, AttentionLayer
 from ts_benchmark.baselines.duet.johnson_system import JohnsonOutput
+from ts_benchmark.baselines.duet.gpd_system import ExtendedGPDOutput
 from ts_benchmark.baselines.duet.layers.common import MLPProjectionHead
 from ts_benchmark.baselines.duet.layers.esn.reservoir_expert import UnivariateReservoirExpert, MultivariateReservoirExpert
 
@@ -100,6 +101,7 @@ class DenormalizingDistribution:
 class DUETProbModel(nn.Module):  # Renamed from DUETModel
     def __init__(self, config):
         super(DUETProbModel, self).__init__()
+        self.config = config
 
         # --- Core components of DUET (are preserved) ---
         self.cluster = Linear_extractor_cluster(config)
@@ -134,16 +136,20 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
             norm_layer=torch.nn.LayerNorm(config.d_model)
         )
 
-        # --- NEW: Probabilistic head for Johnson system ---
-        # Initialize the output layer with the channel types from the configuration
-        self.distr_output = JohnsonOutput(config.johnson_channel_types)
+        # --- NEW: Probabilistic head selection ---
+        if config.distribution_family == "Johnson":
+            self.distr_output = JohnsonOutput(config.channel_types)
+        elif config.distribution_family == "ZIEGPD_M1":
+            self.distr_output = ExtendedGPDOutput(config.channel_types)
+        else:
+            raise ValueError(f"Unknown distribution_family: {config.distribution_family}")
 
         # --- NEW: A single, unified projection head per channel ---
         self.channel_names = list(config.channel_bounds.keys())
         self.projection_heads = nn.ModuleDict()
 
         in_features_per_channel = self.d_model
-        # Output dimension: 4 parameters (Johnson) * horizon length
+        # Output dimension: parameters * horizon length
         out_features_per_channel = self.horizon * self.distr_output.args_dim
 
         hidden_dim_factor = getattr(config, 'projection_head_dim_factor', 2)
@@ -205,20 +211,24 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
             channel_feature = channel_group_feature[:, i, :]
             raw_params = self.projection_heads[name](channel_feature)
 
-            # NEW: Stabilize the output with tanh at the correct position.
-            # This squeezes the parameters into the stable range [-1, 1] and
-            # prevents numerical instability in the Johnson distribution.
-            flat_params = torch.tanh(raw_params)
+            # The tanh activation is removed. Parameter constraints are now handled
+            # by the distribution-specific output classes (e.g., JohnsonOutput)
+            # or within the distribution itself (e.g., ZIEGPD).
             
-            reshaped_params = rearrange(flat_params, 'b (h p) -> b h p', h=self.horizon, p=self.distr_output.args_dim)
+            reshaped_params = rearrange(raw_params, 'b (h p) -> b h p', h=self.horizon, p=self.distr_output.args_dim)
             distr_params_list.append(reshaped_params)
 
 
         distr_params = torch.stack(distr_params_list, dim=1)
         distr_params = torch.nan_to_num(distr_params, nan=0.0, posinf=1e4, neginf=-1e4)
 
-        base_distr = self.distr_output.distribution(distr_params)
-        final_distr = DenormalizingDistribution(base_distr, stats)
+        base_distr = self.distr_output.distribution(distr_params, self.horizon)
+
+        # Conditionally wrap the distribution for denormalization
+        if self.config.distribution_family == "Johnson":
+            final_distr = DenormalizingDistribution(base_distr, stats)
+        else: # For ZIEGPD_M1 and potentially others that model the original scale
+            final_distr = base_distr
 
         return final_distr, base_distr, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, p_learned, p_final, clean_logits, noisy_logits
 

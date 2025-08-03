@@ -43,8 +43,8 @@ FIXED_PARAMS = {
     "patience": 5,
     "early_stopping_delta": 1e-4,
     
-    # NEU: Umgestellt auf Johnson-System
-    "distribution_family": "johnson_system",
+
+    "distribution_family": "ZIEGPD_M1",
     
     "num_workers": int(os.getenv("TRIAL_WORKERS", "4")),
     "quantiles": [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99], # <-- HIER ERWEITERN
@@ -85,7 +85,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
 
     # --- NEU: moving_avg als kategorialer Hyperparameter ---
     # Gib hier sinnvolle Werte basierend auf der bekannten Periodizität deiner Daten an.
-    params["moving_avg"] = trial.suggest_categorical("moving_avg", [25, 49, 97, 193]) # für wasserpegel schwierig zu raten, stündlich, halbtäglich, täglich, oder zweitäglich? soll optuna rausfinden.
+    params["moving_avg"] = trial.suggest_categorical("moving_avg", [25, 49, 97, 193]) # für wasserpegel schwierig zu raten, stündlich, halbtäglich, täglich, oder zweitäglich?
 
     # --- KORREKTUR: Statischer Suchraum für n_heads ---
     # 1. Schlage n_heads immer aus der vollen Liste vor, um den Suchraum statisch zu halten.
@@ -134,7 +134,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
 
     # Schlage univariaten ESN-Parameter vor, wenn diese Experten verwendet werden.
     if params["num_univariate_esn_experts"] > 0:
-        params["reservoir_size_uni"] = trial.suggest_categorical("reservoir_size_uni", [16, 32, 64, 128, 256])
+        params["reservoir_size_uni"] = trial.suggest_categorical("reservoir_size_uni", [32, 64, 128, 256])
         params["spectral_radius_uni"] = trial.suggest_float("spectral_radius_uni", 0.6, 1.4)
         params["sparsity_uni"] = trial.suggest_float("sparsity_uni", 0.01, 0.5)
         params["leak_rate_uni"] = trial.suggest_float("leak_rate_uni", 0.1, 1.0)
@@ -143,7 +143,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
 
     # Schlage multivariaten ESN-Parameter vor, wenn diese Experten verwendet werden.
     if params["num_multivariate_esn_experts"] > 0:
-        params["reservoir_size_multi"] = trial.suggest_categorical("reservoir_size_multi", [16, 32, 64, 128, 256])
+        params["reservoir_size_multi"] = trial.suggest_categorical("reservoir_size_multi", [32, 64, 128, 256])
         params["spectral_radius_multi"] = trial.suggest_float("spectral_radius_multi", 0.6, 1.4)
         params["sparsity_multi"] = trial.suggest_float("sparsity_multi", 0.01, 0.5)
         params["leak_rate_multi"] = trial.suggest_float("leak_rate_multi", 0.1, 1.0)
@@ -172,7 +172,7 @@ def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
     print(f"\n\n{'='*20} STARTING TRIAL #{trial_num} {'='*20}")
     
     suggested_params = get_suggested_params(trial)
-    model_hyper_params = {**FIXED_PARAMS, **suggested_params}
+    model_hyper_params = {**FIXED_PARAMS, **suggested_params, **trial.params}
 
     print("Testing Parameters:")
     for key, value in model_hyper_params.items():
