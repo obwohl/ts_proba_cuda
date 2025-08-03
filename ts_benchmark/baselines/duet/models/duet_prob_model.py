@@ -1,115 +1,107 @@
-# ts_benchmark/baselines/duet/models/duet_prob_model.py
-# (BASIEREND AUF DEM ORIGINALEN DUETMODEL, UMGEBAUT FÜR PROBABILISTISCHE VORHERSAGE)
-
 from typing import Dict, List, Optional
 import torch
 import torch.nn as nn
 from einops import rearrange
-
-# === CORE-KOMPONENTEN VON DUET ===
 from ts_benchmark.baselines.duet.layers.linear_extractor_cluster import Linear_extractor_cluster
 from ts_benchmark.baselines.duet.utils.masked_attention import Mahalanobis_mask, Encoder, EncoderLayer, FullAttention, AttentionLayer
-
-# === NEUE PROBABILISTISCHE KOMPONENTEN ===
 from ts_benchmark.baselines.duet.johnson_system import JohnsonOutput
 from ts_benchmark.baselines.duet.layers.common import MLPProjectionHead
 from ts_benchmark.baselines.duet.layers.esn.reservoir_expert import UnivariateReservoirExpert, MultivariateReservoirExpert
 
 class DenormalizingDistribution:
-    """ 
-    Wrapper für die Denormalisierung. 
-    Nimmt eine Basis-Verteilung auf normalisierten Daten und die Statistik (mean, std)
-    und gibt eine Verteilung zurück, deren Samples (z.B. via icdf) auf der Originalskala liegen.
+    """
+    Wrapper for denormalization.
+    Takes a base distribution on normalized data and the statistics (mean, std)
+    and returns a distribution whose samples (e.g., via icdf) are on the original scale.
     """
     def __init__(self, base_distribution: torch.distributions.Distribution, stats: torch.Tensor):
         self.base_dist = base_distribution
-        # stats hat die Form: [B, N_vars, 2]
-        # self.mean, self.std bekommen die Form: [B, 1, N_vars] für Broadcasting
+        # stats has the shape: [B, N_vars, 2]
+        # self.mean, self.std get the shape: [B, 1, N_vars] for broadcasting
         self.mean = stats[:, :, 0].unsqueeze(1)
-        STD_FLOOR = 1e-6 # Sicherheits-Floor für die Standardabweichung
+        STD_FLOOR = 1e-6  # Safety floor for the standard deviation
         self.std = torch.clamp(stats[:, :, 1], min=STD_FLOOR).unsqueeze(1)
 
     @property
     def loc(self) -> torch.Tensor:
         """
-        Gibt den denormalisierten Median (loc) der Verteilung zurück.
+        Returns the denormalized median (loc) of the distribution.
         """
-        # self.base_dist.loc hat die Form [B, N_vars, H]
-        # self.mean/std haben die Form [B, 1, N_vars]
-        
-        # Passe die Dimensionen von mean/std für Broadcasting an
-        mean_for_bcast = self.mean.squeeze(1).unsqueeze(-1) # [B, N_vars, 1]
-        std_for_bcast = self.std.squeeze(1).unsqueeze(-1)   # [B, N_vars, 1]
-        
-        # Denormalisiere den loc-Parameter der Basis-Verteilung
+        # self.base_dist.loc has shape [B, N_vars, H]
+        # self.mean/std have shape [B, 1, N_vars]
+
+        # Adjust dimensions of mean/std for broadcasting
+        mean_for_bcast = self.mean.squeeze(1).unsqueeze(-1)  # [B, N_vars, 1]
+        std_for_bcast = self.std.squeeze(1).unsqueeze(-1)    # [B, N_vars, 1]
+
+        # Denormalize the loc parameter of the base distribution
         # [B, N_vars, H] * [B, N_vars, 1] + [B, N_vars, 1] -> [B, N_vars, H]
         return self.base_dist.loc * std_for_bcast + mean_for_bcast
 
     @property
     def batch_shape(self):
-        # Definiert die "Größe" der Verteilung
+        # Defines the "size" of the distribution
         return self.base_dist.batch_shape
 
     @property
     def stddev(self) -> torch.Tensor:
         """
-        Gibt die Standardabweichung der denormalisierten Verteilung zurück.
-        Diese wird berechnet, indem die Standardabweichung der Basis-Verteilung
-        mit dem Skalierungsfaktor multipliziert wird.
+        Returns the standard deviation of the denormalized distribution.
+        This is calculated by multiplying the standard deviation of the base distribution
+        with the scaling factor.
         """
-        # self.std hat die Form [B, 1, N_vars]. Wir formen es zu [B, N_vars, 1] um, damit es mit base_dist.stddev ([B, N_vars, H]) broadcasted werden kann.
+        # self.std has shape [B, 1, N_vars]. We reshape it to [B, N_vars, 1] so it can be broadcast with base_dist.stddev ([B, N_vars, H]).
         return self.base_dist.stddev * self.std.permute(0, 2, 1)
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
-        # Erwartet `value` in [B, H, N_vars]
+        # Expects `value` in [B, H, N_vars]
         value_norm = (value - self.mean) / self.std
-        # base_dist.log_prob erwartet [B, N_vars, H], also permutieren
+        # base_dist.log_prob expects [B, N_vars, H], so we permute
         log_p = self.base_dist.log_prob(value_norm.permute(0, 2, 1))
-        # Korrekturterm (Log-Determinante der Jacobi-Matrix der Transformation)
+        # Correction term (log-determinant of the Jacobian of the transformation)
         log_det_jacobian = torch.log(self.std).permute(0, 2, 1)
         return log_p - log_det_jacobian
 
     def icdf(self, q: torch.Tensor) -> torch.Tensor:
-        # base_dist.icdf gibt normalisierte Werte mit der Form [B, N_Vars, Horizon, ...] zurück.
+        # base_dist.icdf returns normalized values with shape [B, N_Vars, Horizon, ...].
         value_norm = self.base_dist.icdf(q)
 
-        # KORREKTUR: Wir müssen die Form von mean/std an die von value_norm anpassen.
-        # self.mean/std haben die Form [B, 1, N_vars].
-        # Zielform für mean/std zum Broadcasten ist [B, N_vars, 1, ...].
-        
-        # 1. Entferne die mittlere Dimension: [B, 1, N_vars] -> [B, N_vars]
+        # CORRECTION: We need to adapt the shape of mean/std to that of value_norm.
+        # self.mean/std have shape [B, 1, N_vars].
+        # Target shape for mean/std for broadcasting is [B, N_vars, 1, ...].
+
+        # 1. Remove the middle dimension: [B, 1, N_vars] -> [B, N_vars]
         mean_squeezed = self.mean.squeeze(1)
         std_squeezed = self.std.squeeze(1)
-        
-        # 2. Füge Dimension für den Horizont hinzu: [B, N_vars] -> [B, N_vars, 1]
+
+        # 2. Add dimension for the horizon: [B, N_vars] -> [B, N_vars, 1]
         mean_for_bcast = mean_squeezed.unsqueeze(-1)
         std_for_bcast = std_squeezed.unsqueeze(-1)
-        
-        # 3. Wenn value_norm eine extra Quantil-Dimension hat, fügen wir eine weitere hinzu.
-        # Form wird: [B, N_vars, 1] -> [B, N_vars, 1, 1]
+
+        # 3. If value_norm has an extra quantile dimension, we add another one.
+        # Shape becomes: [B, N_vars, 1] -> [B, N_vars, 1, 1]
         if value_norm.dim() > mean_for_bcast.dim():
             mean_for_bcast = mean_for_bcast.unsqueeze(-1)
             std_for_bcast = std_for_bcast.unsqueeze(-1)
 
-        # Die Multiplikation funktioniert jetzt:
+        # The multiplication works now:
         # [B, N_Vars, Horizon, Q] * [B, N_Vars, 1, 1] -> [B, N_Vars, Horizon, Q]
         value_orig = value_norm * std_for_bcast + mean_for_bcast
         return value_orig
 
     def normalize_value(self, value: torch.Tensor) -> torch.Tensor:
         """
-        Normalisiert einen externen Wert (z.B. den Zielwert) mit den Statistiken dieser Verteilung.
-        Erwartet `value` in [B, H, N_vars].
+        Normalizes an external value (e.g., the target value) with the statistics of this distribution.
+        Expects `value` in [B, H, N_vars].
         """
         return (value - self.mean) / self.std
 
-# === DAS NEUE, PROBABILISTISCHE DUET MODELL ===
 
-class DUETProbModel(nn.Module): # Umbenannt von DUETModel
+class DUETProbModel(nn.Module):  # Renamed from DUETModel
     def __init__(self, config):
         super(DUETProbModel, self).__init__()
 
-        # --- Kernkomponenten von DUET (bleiben erhalten) ---
+        # --- Core components of DUET (are preserved) ---
         self.cluster = Linear_extractor_cluster(config)
         self.expert_embedding_dim = config.expert_embedding_dim
         self.CI = config.CI
@@ -117,7 +109,7 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
         self.d_model = config.d_model
         self.horizon = config.horizon
 
-        # Die Maske braucht die Anzahl der Variablen
+        # The mask needs the number of variables
         self.mask_generator = Mahalanobis_mask(config.seq_len, n_vars=self.n_vars)
         self.Channel_transformer = Encoder(
             [
@@ -142,16 +134,16 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
             norm_layer=torch.nn.LayerNorm(config.d_model)
         )
 
-        # --- NEU: Probabilistischer Kopf für Johnson-System ---
-        # Initialisiere den Output-Layer mit den Kanaltypen aus der Konfiguration
+        # --- NEW: Probabilistic head for Johnson system ---
+        # Initialize the output layer with the channel types from the configuration
         self.distr_output = JohnsonOutput(config.johnson_channel_types)
 
-        # --- NEU: Ein einziger, vereinheitlichter Projektionskopf pro Kanal ---
+        # --- NEW: A single, unified projection head per channel ---
         self.channel_names = list(config.channel_bounds.keys())
         self.projection_heads = nn.ModuleDict()
 
         in_features_per_channel = self.d_model
-        # Output-Dimension: 4 Parameter (Johnson) * Horizontlänge
+        # Output dimension: 4 parameters (Johnson) * horizon length
         out_features_per_channel = self.horizon * self.distr_output.args_dim
 
         hidden_dim_factor = getattr(config, 'projection_head_dim_factor', 2)
@@ -213,9 +205,9 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
             channel_feature = channel_group_feature[:, i, :]
             raw_params = self.projection_heads[name](channel_feature)
 
-            # NEU: Stabilisierung der Ausgabe mit tanh an der korrekten Stelle.
-            # Dies quetscht die Parameter in den stabilen Bereich [-1, 1] und
-            # verhindert die numerische Instabilität in der Johnson-Verteilung.
+            # NEW: Stabilize the output with tanh at the correct position.
+            # This squeezes the parameters into the stable range [-1, 1] and
+            # prevents numerical instability in the Johnson distribution.
             flat_params = torch.tanh(raw_params)
             
             reshaped_params = rearrange(flat_params, 'b (h p) -> b h p', h=self.horizon, p=self.distr_output.args_dim)
@@ -232,11 +224,11 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
 
     def get_parameter_groups(self):
         """
-        NEU: Kapselt die Logik zur Identifizierung von Parametergruppen für den Optimizer.
-        Dies macht den Trainingscode in duet_prob.py sauberer und robuster.
+        NEW: Encapsulates the logic for identifying parameter groups for the optimizer.
+        This makes the training code in duet_prob.py cleaner and more robust.
 
         Returns:
-            tuple: Ein Tupel mit drei Listen von Parametern:
+            tuple: A tuple with three lists of parameters:
                    (esn_uni_readout_params, esn_multi_readout_params, other_params)
         """
         esn_uni_readout_params = []
@@ -255,7 +247,7 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
                         esn_uni_readout_params.append(param)
                     elif isinstance(expert_module, MultivariateReservoirExpert):
                         esn_multi_readout_params.append(param)
-                    else: # z.B. lineare Experten haben keinen 'readout' Layer, aber zur Sicherheit
+                    else:  # e.g. linear experts do not have a 'readout' layer, but for safety
                         other_params.append(param)
                 except (ValueError, IndexError):
                     other_params.append(param)
