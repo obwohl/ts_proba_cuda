@@ -11,8 +11,6 @@ from torch.distributions.utils import broadcast_all
 from typing import List, Dict
 import math
 
-# --- NATIVE PYTORCH IMPLEMENTATIONS OF JOHNSON DISTRIBUTIONS ---
-# These are used during the model's training loop for performance and stability.
 
 class JohnsonSU_torch(Distribution):
     """Pure PyTorch implementation of the Johnson SU distribution's log_prob."""
@@ -323,7 +321,6 @@ def get_best_johnson_fit(data: np.ndarray) -> str:
 
     return best_fit_type
 
-# --- MODEL OUTPUT AND DISTRIBUTION CLASSES ---
 
 class JohnsonOutput:
     args_dim: int = 4
