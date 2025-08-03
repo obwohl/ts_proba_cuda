@@ -39,8 +39,8 @@ FIXED_PARAMS = {
     # Setze hier einen Kanalnamen (z.B. "wassertemp"), um den Validierungs-Loss nur für diesen Kanal zu berechnen.
     # Setze auf `None`, um den Durchschnitt über alle Kanäle zu verwenden (Standardverhalten).
     "optimization_target_channel": None,
-    "num_epochs": 100,
-    "patience": 5,
+    "num_epochs": 30,
+    "patience": 3,
     "early_stopping_delta": 1e-4,
     
 
@@ -48,7 +48,7 @@ FIXED_PARAMS = {
     
     "num_workers": int(os.getenv("TRIAL_WORKERS", "4")),
     "quantiles": [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99], # <-- HIER ERWEITERN
-    "lradj": "cosine_warmup", # Um Cosine Annealing zu verwenden
+    "lradj": "constant", # Um Cosine Annealing zu verwenden
     "warmup_epochs": 0,
     "min_epochs_for_pruning": 3,
     # PyTorch Profiler ist deaktiviert. Setze eine Epochennummer (z.B. 1), um ihn zu aktivieren.
@@ -78,7 +78,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params = {}
     params["seq_len"] = trial.suggest_categorical("seq_len", [48, 96, 192, 384, 480])
     params["norm_mode"] = trial.suggest_categorical("norm_mode", ["subtract_last", "subtract_median"])
-    params["lr"] = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
+    params["lr"] = trial.suggest_float("lr", 1e-6, 1e-2, log=True)
     params["d_model"] = trial.suggest_categorical("d_model", [32, 64, 128, 256])
     params["d_ff"] = trial.suggest_categorical("d_ff", [32, 64, 128, 256])
     params["e_layers"] = trial.suggest_int("e_layers", 1, 3)
