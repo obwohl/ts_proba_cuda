@@ -628,14 +628,11 @@ class DUETProb(ModelBase):
                 if epoch_denorm_losses_per_channel:
                     all_train_losses_denorm = np.concatenate(epoch_denorm_losses_per_channel, axis=0)
                     
-                    avg_train_loss_all_channels = np.mean(all_train_losses_denorm)
-                    writer.add_scalar("Denormalized NLL/Train/AllChannels_Avg", avg_train_loss_all_channels, epoch)
-
+                    # Loggt den Loss pro Kanal für das Training
                     avg_train_loss_per_channel = np.mean(all_train_losses_denorm, axis=0)
                     channel_names = list(self.config.channel_bounds.keys())
                     for i, name in enumerate(channel_names):
-                        writer.add_scalar(f"Denormalized NLL per Channel/Train/{name}", avg_train_loss_per_channel[i], epoch)
-
+                        writer.add_scalar(f"Loss pro Channel/Training/{name}", avg_train_loss_per_channel[i], epoch)
                 if expert_metrics_batch_count > 0:
                     avg_gate_weights_linear = sum_gate_weights_linear / expert_metrics_batch_count if sum_gate_weights_linear is not None else None
                     avg_gate_weights_uni_esn = sum_gate_weights_uni_esn / expert_metrics_batch_count if sum_gate_weights_uni_esn is not None else None
@@ -673,10 +670,11 @@ class DUETProb(ModelBase):
                 if valid_data_loader is not None:
                     all_window_losses_denorm, _ = self.validate(valid_data_loader, writer, epoch, device, desc=f"Epoch {epoch+1} Validation")
                     
+                    # Loggt den Loss pro Kanal für die Validierung
                     channel_names = list(self.config.channel_bounds.keys())
                     for i, name in enumerate(channel_names):
                         avg_channel_loss = np.mean(all_window_losses_denorm[:, i])
-                        writer.add_scalar(f"Denormalized NLL per Channel/Validation/{name}", avg_channel_loss, epoch)
+                        writer.add_scalar(f"Loss pro Channel/Validation/{name}", avg_channel_loss, epoch)
 
                     target_channel = getattr(self.config, 'optimization_target_channel', None)
                     optimization_target_name_for_log = ""
