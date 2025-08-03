@@ -564,6 +564,7 @@ class DUETProb(ModelBase):
                             
                         epoch_total_losses.append(total_loss.item())
                         epoch_importance_losses.append(loss_importance.item())
+                        epoch_normalized_losses.append(nll_loss.item())
 
                         if sum_gate_weights_linear is not None and batch_gate_weights_linear.numel() > 0:
                             sum_gate_weights_linear += batch_gate_weights_linear.detach()
