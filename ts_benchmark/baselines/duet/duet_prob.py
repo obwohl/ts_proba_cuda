@@ -492,6 +492,13 @@ class DUETProb(ModelBase):
                         target = target.to(device)
                         
                         denorm_distr, base_distr, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, batch_selection_counts, p_learned, p_final, clean_logits, noisy_logits = self.model(input_data)
+                        # --- DEBUG PRINT: After model output unpacking ---
+                        if self.model.training:
+                            print(f"\n[DEBUG duet_prob.py | Training Loop] batch_selection_counts after model call: {batch_selection_counts}")
+                            if batch_selection_counts is not None:
+                                print(f"  Shape: {batch_selection_counts.shape}, Dtype: {batch_selection_counts.dtype}, Device: {batch_selection_counts.device}")
+                                print(f"  Values: {batch_selection_counts.cpu().numpy()}")
+                        # --- END DEBUG PRINT ---
                         
                         # --- DIAGNOSTIC LOG | POINT C ---
                         if epoch == 0 and not logged_point_c:
@@ -611,13 +618,13 @@ class DUETProb(ModelBase):
                         epoch_importance_losses.append(loss_importance.item())
 
                         if sum_gate_weights_linear is not None and batch_gate_weights_linear.numel() > 0:
-                            sum_gate_weights_linear += batch_gate_weights_linear.detach().mean(dim=0)
+                            sum_gate_weights_linear += batch_gate_weights_linear.detach()
                         if sum_gate_weights_uni_esn is not None and batch_gate_weights_uni_esn.numel() > 0:
-                            sum_gate_weights_uni_esn += batch_gate_weights_uni_esn.detach().mean(dim=0)
+                            sum_gate_weights_uni_esn += batch_gate_weights_uni_esn.detach()
                         if sum_gate_weights_multi_esn is not None and batch_gate_weights_multi_esn.numel() > 0:
-                            sum_gate_weights_multi_esn += batch_gate_weights_multi_esn.detach().mean(dim=0)
+                            sum_gate_weights_multi_esn += batch_gate_weights_multi_esn.detach()
                         if sum_selection_counts is not None and batch_selection_counts.numel() > 0:
-                            sum_selection_counts += batch_selection_counts.detach().mean(dim=0)
+                            sum_selection_counts += batch_selection_counts.detach()
                         
                         expert_metrics_batch_count += 1
                         sum_p_learned += p_learned.detach().sum(dim=0)
@@ -684,6 +691,14 @@ class DUETProb(ModelBase):
                         writer.add_scalar(f"C) Denormalized NLL per Channel | {name} | Train", avg_train_loss_per_channel[i], epoch)
 
                 if expert_metrics_batch_count > 0:
+                    # --- DEBUG PRINT: Before avg_selection_counts calculation ---
+                    print(f"\n[DEBUG duet_prob.py | Training Loop] Before avg_selection_counts calculation:")
+                    print(f"  sum_selection_counts: {sum_selection_counts}")
+                    if sum_selection_counts is not None:
+                        print(f"    Shape: {sum_selection_counts.shape}, Dtype: {sum_selection_counts.dtype}, Device: {sum_selection_counts.device}")
+                        print(f"    Values: {sum_selection_counts.cpu().numpy()}")
+                    print(f"  expert_metrics_batch_count: {expert_metrics_batch_count}")
+                    # --- END DEBUG PRINT ---
                     avg_gate_weights_linear = sum_gate_weights_linear / expert_metrics_batch_count if sum_gate_weights_linear is not None else None
                     avg_gate_weights_uni_esn = sum_gate_weights_uni_esn / expert_metrics_batch_count if sum_gate_weights_uni_esn is not None else None
                     avg_gate_weights_multi_esn = sum_gate_weights_multi_esn / expert_metrics_batch_count if sum_gate_weights_multi_esn is not None else None
@@ -892,7 +907,7 @@ Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
                 
                 target_horizon = target[:, -self.config.horizon:, :]
 
-                denorm_distr, base_distr, _, _, _, _, _, _, _ = self.model(input_data)
+                denorm_distr, base_distr, _, _, _, _, _, _, _, _, _ = self.model(input_data)
                 
                 denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
                 all_denorm_losses.append(denorm_loss_per_sample.cpu().numpy())

@@ -17,17 +17,6 @@ from ts_benchmark.data.data_source import LocalForecastingDataSource
 from ts_benchmark.baselines.utils import forecasting_data_provider, train_val_split
 
 
-# === ADD THIS CODE BLOCK GLOBALLY ===
-# This overwrites the PyTorch function that checks for MPS availability.
-# All subsequent calls to torch.backends.mps.is_available() in your code
-# will now return False, forcing the fallback to CPU.
-print("--- [DIAGNOSTIC OVERRIDE] ---")
-print("Patching torch.backends.mps.is_available() to return False.")
-print("The script will now run on CPU.")
-print("-----------------------------")
-torch.backends.mps.is_available = lambda: False
-# ===================================
-
 # --- FIX: "Too many open files" Error ---
 # Ändert die Strategie, wie Worker-Prozesse Daten teilen.
 # 'file_system' ist robuster für langlaufende Experimente als der Standard 'file_descriptor'.

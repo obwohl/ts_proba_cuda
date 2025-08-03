@@ -250,6 +250,16 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
         base_distr = self.distr_output.distribution(distr_params)
         final_distr = DenormalizingDistribution(base_distr, stats)
 
+        if self.training: # Only log during training
+            print(f"\n[DEBUG DUETProbModel.forward] expert_selection_counts (before return): {expert_selection_counts}")
+            if expert_selection_counts is not None:
+                print(f"  Shape: {expert_selection_counts.shape}, Dtype: {expert_selection_counts.dtype}, Device: {expert_selection_counts.device}")
+                print(f"  Values: {expert_selection_counts.cpu().numpy()}")
+        if self.training: # Only log during training
+            print(f"\n[DEBUG DUETProbModel.forward] expert_selection_counts (before return): {expert_selection_counts}")
+            if expert_selection_counts is not None:
+                print(f"  Shape: {expert_selection_counts.shape}, Dtype: {expert_selection_counts.dtype}, Device: {expert_selection_counts.device}")
+                print(f"  Values: {expert_selection_counts.cpu().numpy()}")
         return final_distr, base_distr, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, p_learned, p_final, clean_logits, noisy_logits
 
     def get_parameter_groups(self):
