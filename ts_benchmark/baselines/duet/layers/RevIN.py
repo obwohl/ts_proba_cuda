@@ -34,8 +34,6 @@ class RevIN(nn.Module):
             # Learnable affine parameters (reshaped for broadcasting)
             self.gamma = nn.Parameter(torch.ones(1, 1, self.num_features))
             self.beta = nn.Parameter(torch.zeros(1, 1, self.num_features))
-            self.gamma.register_hook(lambda grad: print(f"[DIAGNOSTIC LOG | RevIN] Gamma Grad: mean={grad.mean().item():.6f}, std={grad.std().item():.6f}, has_nan={torch.isnan(grad).any().item()}"))
-            self.beta.register_hook(lambda grad: print(f"[DIAGNOSTIC LOG | RevIN] Beta Grad: mean={grad.mean().item():.6f}, std={grad.std().item():.6f}, has_nan={torch.isnan(grad).any().item()}"))
 
     def forward(self, x: torch.Tensor, mode: str, stats_to_use=None):
         """
@@ -79,17 +77,7 @@ class RevIN(nn.Module):
             self.location_stat = x[:, -1:, :] # CORRECTED: .detach() removed
             # Scale is the RMS of the sequence after subtracting the location.
             x_centered = x - self.location_stat
-            # # --- NEW DIAGNOSTIC LOGGING ---
-            # if self.training: # Only log during training
-            #     print(f"\n[DIAGNOSTIC LOG | RevIN] Before scale_stat calculation (subtract_last):")
-            #     print(f"  x_centered mean: {x_centered.mean().item():.6f}, std: {x_centered.std().item():.6f}")
-            #     print(f"  x_centered min: {x_centered.min().item():.6f}, max: {x_centered.max().item():.6f}")
-            #     print(f"  x_centered has nan: {torch.isnan(x_centered).any().item()}")
-            #     mean_squared_x_centered = torch.mean(x_centered**2, dim=1, keepdim=True)
-            #     print(f"  mean_squared_x_centered mean: {mean_squared_x_centered.mean().item():.6f}, std: {mean_squared_x_centered.std().item():.6f}")
-            #     print(f"  mean_squared_x_centered min: {mean_squared_x_centered.min().item():.6f}, max: {mean_squared_x_centered.max().item():.6f}")
-            #     print(f"  mean_squared_x_centered has nan: {torch.isnan(mean_squared_x_centered).any().item()}")
-            # # --- END NEW DIAGNOSTIC LOGGING ---
+            
             self.scale_stat = torch.sqrt(torch.mean(x_centered**2, dim=1, keepdim=True) + self.eps) # CORRECTED: .detach() removed
 
         elif self.norm_mode == 'subtract_median':
@@ -97,68 +85,22 @@ class RevIN(nn.Module):
             self.location_stat = torch.median(x, dim=1, keepdim=True)[0] # CORRECTED: .detach() removed
             # Scale is the RMS of the sequence after subtracting the location.
             x_centered = x - self.location_stat
-            # # --- NEW DIAGNOSTIC LOGGING ---
-            # if self.training: # Only log during training
-            #     print(f"\n[DIAGNOSTIC LOG | RevIN] Before scale_stat calculation (subtract_median):")
-            #     print(f"  x_centered mean: {x_centered.mean().item():.6f}, std: {x_centered.std().item():.6f}")
-            #     print(f"  x_centered min: {x_centered.min().item():.6f}, max: {x_centered.max().item():.6f}")
-            #     print(f"  x_centered has nan: {torch.isnan(x_centered).any().item()}")
-            #     mean_squared_x_centered = torch.mean(x_centered**2, dim=1, keepdim=True)
-            #     print(f"  mean_squared_x_centered mean: {mean_squared_x_centered.mean().item():.6f}, std: {mean_squared_x_centered.std().item():.6f}")
-            #     print(f"  mean_squared_x_centered min: {mean_squared_x_centered.min().item():.6f}, max: {mean_squared_x_centered.max().item():.6f}")
-            #     print(f"  mean_squared_x_centered has nan: {torch.isnan(mean_squared_x_centered).any().item()}")
-            # # --- END NEW DIAGNOSTIC LOGGING ---
+            
             self.scale_stat = torch.sqrt(torch.mean(x_centered**2, dim=1, keepdim=True) + self.eps) # CORRECTED: .detach() removed
 
-        # # --- NEW DIAGNOSTIC LOGGING ---
-        # if self.training: # Only log during training
-        #     print(f"\n[DIAGNOSTIC LOG | RevIN] After _get_statistics:")
-        #     print(f"  norm_mode: {self.norm_mode}")
-        #     print(f"  location_stat mean: {self.location_stat.mean().item():.6f}, std: {self.location_stat.std().item():.6f}")
-        #     print(f"  location_stat min: {self.location_stat.min().item():.6f}, max: {self.location_stat.max().item():.6f}")
-        #     print(f"  location_stat has nan: {torch.isnan(self.location_stat).any().item()}")
-        #     print(f"  scale_stat mean: {self.scale_stat.mean().item():.6f}, std: {self.scale_stat.std().item():.6f}")
-        #     print(f"  scale_stat min: {self.scale_stat.min().item():.6f}, max: {self.scale_stat.max().item():.6f}")
-        #     print(f"  scale_stat has nan: {torch.isnan(self.scale_stat).any().item()}")
-        # # --- END NEW DIAGNOSTIC LOGGING ---
+    
             
     def _normalize(self, x):
         """Applies the normalization."""
         x_norm = (x - self.location_stat) / self.scale_stat
 
-        # # --- NEW DIAGNOSTIC LOGGING ---
-        # if self.training: # Only log during training
-        #     print(f"\n[DIAGNOSTIC LOG | RevIN] After initial normalization (before affine):")
-        #     print(f"  x_norm mean: {x_norm.mean().item():.6f}, std: {x_norm.std().item():.6f}")
-        #     print(f"  x_norm min: {x_norm.min().item():.6f}, max: {x_norm.max().item():.6f}")
-        #     print(f"  x_norm has nan: {torch.isnan(x_norm).any().item()}")
-        # # --- END NEW DIAGNOSTIC LOGGING ---
+    
 
         if self.affine:
-            # # --- NEW DIAGNOSTIC LOGGING ---
-            # if self.training: # Only log during training
-            #     print(f"\n[DIAGNOSTIC LOG | RevIN] Before affine transformation:")
-            #     print(f"  gamma mean: {self.gamma.mean().item():.6f}, std: {self.gamma.std().item():.6f}")
-            #     print(f"  gamma min: {self.gamma.min().item():.6f}, max: {self.gamma.max().item():.6f}")
-            #     print(f"  gamma has nan: {torch.isnan(self.gamma).any().item()}")
-            #     print(f"  beta mean: {self.beta.mean().item():.6f}, std: {self.beta.std().item():.6f}")
-            #     print(f"  beta min: {self.beta.min().item():.6f}, max: {self.beta.max().item():.6f}")
-            #     print(f"  beta has nan: {torch.isnan(self.beta).any().item()}")
-            # # --- END NEW DIAGNOSTIC LOGGING ---
+         
             
             x_norm = x_norm * self.gamma + self.beta
-            # # --- NEW DIAGNOSTIC LOGGING ---
-            # if self.training: # Only log during training
-            #     print(f"\n[DIAGNOSTIC LOG | RevIN] After affine transformation:")
-            #     print(f"  x_norm (after affine) mean: {x_norm.mean().item():.6f}, std: {x_norm.std().item():.6f}")
-            #     print(f"  x_norm (after affine) min: {x_norm.min().item():.6f}, max: {x_norm.max().item():.6f}")
-            #     print(f"  x_norm (after affine) has nan: {torch.isnan(x_norm).any().item()}")
-            #     if x_norm.grad is not None:
-            #         print(f"  x_norm grad (after affine) mean: {x_norm.grad.mean().item():.6f}, std: {x_norm.grad.std().item():.6f}")
-            #         print(f"  x_norm grad (after affine) has nan: {torch.isnan(x_norm.grad).any().item()}")
-            #     else:
-            #         print(f"  x_norm grad (after affine): None")
-            # # --- END NEW DIAGNOSTIC LOGGING ---
+           
         return x_norm
 
     def _denormalize(self, x, stats_to_use):

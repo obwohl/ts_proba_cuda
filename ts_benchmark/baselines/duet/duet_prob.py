@@ -19,16 +19,11 @@ import contextlib
 from PIL import Image
 from tqdm import tqdm
 import hashlib
-
-# === Korrekte Imports für das neue Modell und die Utilities ===
 from ts_benchmark.baselines.duet.models.duet_prob_model import DUETProbModel, DenormalizingDistribution
 from ts_benchmark.baselines.duet.utils.tools import adjust_learning_rate, EarlyStopping
 from ts_benchmark.baselines.utils import forecasting_data_provider, train_val_split
-# === NEUER IMPORT FÜR DIE FENSTER-SUCHE ===
 from ts_benchmark.baselines.duet.utils.window_search import find_interesting_windows
-# === NEUER IMPORT FÜR EXPERTEN-TYPEN ===
 from ts_benchmark.baselines.duet.layers.esn.reservoir_expert import UnivariateReservoirExpert, MultivariateReservoirExpert
-# === NEUER IMPORT FÜR JOHNSON-SYSTEM ===
 from ts_benchmark.baselines.duet.johnson_system import get_best_johnson_fit
 from ...models.model_base import ModelBase
 
@@ -40,8 +35,6 @@ def _get_tensor_signature(tensor: torch.Tensor) -> str:
     probe_sig = f"{tensor.view(-1)[0].item():.6f}"
     return f"Hash: {hash_sig} | Stats: ({stats_sig}) | Probe[0]: {probe_sig}"''
 
-# === NEU: In-Memory-Cache für die Ergebnisse der Fenstersuche ===
-# Dies verhindert, dass die teure Suche in jedem Optuna-Trial neu ausgeführt wird.
 WINDOW_SEARCH_CACHE = {}
 
 def calculate_cvar(losses: np.ndarray, alpha: float) -> float:
@@ -359,14 +352,6 @@ class DUETProb(ModelBase):
         device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
         self.model.to(device)
 
-        # --- DIAGNOSTIC LOG | POINT B ---
-        print("\n[DIAGNOSTIC LOG | POINT B] After model.to(device):")
-        model_ref = self.model.module if hasattr(self.model, 'module') else self.model
-        for i, expert in enumerate(model_ref.cluster.experts):
-            first_param = next(expert.parameters(), None)
-            if first_param is not None:
-                print(f"  Expert {i} ({expert.__class__.__name__}): {_get_tensor_signature(first_param.data)}")
-        
         print(f"--- Model Analysis ---Total trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
 
         if torch.cuda.device_count() > 1:
@@ -492,63 +477,7 @@ class DUETProb(ModelBase):
                         target = target.to(device)
                         
                         denorm_distr, base_distr, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, batch_selection_counts, p_learned, p_final, clean_logits, noisy_logits = self.model(input_data)
-                        # # --- DEBUG PRINT: After model output unpacking ---
-                        # if self.model.training:
-                        #     print(f"\n[DEBUG duet_prob.py | Training Loop] batch_selection_counts after model call: {batch_selection_counts}")
-                        #     if batch_selection_counts is not None:
-                        #         print(f"  Shape: {batch_selection_counts.shape}, Dtype: {batch_selection_counts.dtype}, Device: {batch_selection_counts.device}")
-                        #         print(f"  Values: {batch_selection_counts.cpu().numpy()}")
-                        # # --- END DEBUG PRINT ---
                         
-                        # # --- DIAGNOSTIC LOG | POINT C ---
-                        # if epoch == 0 and not logged_point_c:
-                        #     print("\n[DIAGNOSTIC LOG | POINT C] After 1st forward() pass:")
-                        #     print(f"  Clean Logits (after model call): {clean_logits.shape if clean_logits is not None else None}")
-                        #     print(f"  Noisy Logits (after model call): {noisy_logits.shape if noisy_logits is not None else None}")
-                        #     model_ref = self.model.module if hasattr(self.model, 'module') else self.model
-                        #     for idx, expert in enumerate(model_ref.cluster.experts):
-                        #         first_param = next(expert.parameters(), None)
-                        #         if first_param is not None:
-                        #             print(f"  Expert {idx} ({expert.__class__.__name__}): {_get_tensor_signature(first_param.data)}")
-                        #     logged_point_c = True
-
-                        # # --- DIAGNOSTIC LOG | POINT E (Moved) ---
-                        # if epoch == 0 and (i + 1) % accumulation_steps == 0: # Log only once per batch accumulation
-                        #     print("\n[DIAGNOSTIC LOG | POINT E] Gating Network Gradients (after forward pass and before optimizer.step()):")
-                        #     model_ref = self.model.module if hasattr(self.model, 'module') else self.model
-                        #     gate_weight = model_ref.cluster.gate.distribution_fit[0].weight
-                        #     noise_weight = model_ref.cluster.noise.distribution_fit[0].weight
-                            
-                        #     # Check gradients of clean_logits and noisy_logits
-                        #     if clean_logits.grad is not None:
-                        #         print(f"  Clean Logits Grad Norm: {clean_logits.grad.norm().item():.6f}")
-                        #         print(f"  Clean Logits Grad Mean: {clean_logits.grad.mean().item():.6f}")
-                        #         print(f"  Clean Logits Grad Std: {clean_logits.grad.std().item():.6f}")
-                        #     else:
-                        #         print("  Clean Logits Grad: None")
-
-                        #     if self.config.noisy_gating and noisy_logits.grad is not None:
-                        #         print(f"  Noisy Logits Grad Norm: {noisy_logits.grad.norm().item():.6f}")
-                        #         print(f"  Noisy Logits Grad Mean: {noisy_logits.grad.mean().item():.6f}")
-                        #         print(f"  Noisy Logits Grad Std: {noisy_logits.grad.std().item():.6f}")
-                        #     else:
-                        #         print("  Noisy Logits Grad: None")
-
-                        #     if gate_weight.grad is not None:
-                        #         print(f"  Gate Weight Grad Norm: {gate_weight.grad.norm().item():.6f}")
-                        #         print(f"  Gate Weight Grad Mean: {gate_weight.grad.mean().item():.6f}")
-                        #         print(f"  Gate Weight Grad Std: {gate_weight.grad.std().item():.6f}")
-                        #     else:
-                        #         print("  Gate Weight Grad: None")
-                        #     if noise_weight.grad is not None:
-                        #         print(f"  Noise Weight Grad Norm: {noise_weight.grad.norm().item():.6f}")
-                        #         print(f"  Noise Weight Grad Mean: {noise_weight.grad.mean().item():.6f}")
-                        #         print(f"  Noise Weight Grad Std: {noise_weight.grad.std().item():.6f}")
-                        #     else:
-                        #         print("  Noise Weight Grad: None")
-                        #     # Log the actual weights as well to see if they are changing
-                        #     print(f"  Gate Weight Probe[0]: {gate_weight.view(-1)[0].item():.6f}")
-                        #     print(f"  Noise Weight Probe[0]: {noise_weight.view(-1)[0].item():.6f}")
 
                         target_horizon = target[:, -config.horizon:, :]
                         
@@ -576,41 +505,11 @@ class DUETProb(ModelBase):
                                 torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=1.0)
 
 
-# --- DIAGNOSTISCHES LOGGING (PRE-STEP) ---
-                            print("\n" + "="*25 + " DIAGNOSE VOR OPTIMIZER.STEP " + "="*25)
-                            print(f"Batch {i+1} | NLL (norm): {normalized_loss.item():.6f} | Importance Loss: {loss_importance.item():.6f} | Total Loss: {total_loss.item():.6f}")
 
-                            # Referenz auf das eigentliche Modell (behandelt DataParallel)
-                            model_ref = self.model.module if hasattr(self.model, 'module') else self.model
-                            
-                            # 1. Gradienten des Gating-Netzwerks prüfen
-                            gate_grad = model_ref.cluster.gate.distribution_fit[0].weight.grad
-                            if gate_grad is not None:
-                                print(f"Gating Weight Grad -> mean: {gate_grad.mean().item():.6f}, std: {gate_grad.std().item():.6f}, max_abs: {gate_grad.abs().max().item():.6f}")
-                            else:
-                                print("Gating Weight Grad -> None")
-
-                            # 2. Gradienten des ersten Experten prüfen (Beispiel)
-                            # Wir prüfen den 'Linear_Seasonal'-Layer des ersten linearen Experten
-                            expert0_grad = model_ref.cluster.experts[0].Linear_Seasonal.weight.grad
-                            if expert0_grad is not None:
-                                print(f"Expert 0 Weight Grad -> mean: {expert0_grad.mean().item():.6f}, std: {expert0_grad.std().item():.6f}, max_abs: {expert0_grad.abs().max().item():.6f}")
-                            else:
-                                print("Expert 0 Weight Grad -> None")
-                            print("="*75 + "\n")
-                            # --- ENDE DIAGNOSTISCHES LOGGING ---
 
                             optimizer.step()
                             optimizer.zero_grad()
-                            # --- DIAGNOSTIC LOG | POINT D ---
-                            if epoch == 0 and not logged_point_d:
-                                print("\n[DIAGNOSTIC LOG | POINT D] After 1st optimizer.step():")
-                                model_ref = self.model.module if hasattr(self.model, 'module') else self.model
-                                for idx, expert in enumerate(model_ref.cluster.experts):
-                                    first_param = next(expert.parameters(), None)
-                                    if first_param is not None:
-                                        print(f"  Expert {idx} ({expert.__class__.__name__}): {_get_tensor_signature(first_param.data)}")
-                                logged_point_d = True
+                            
                                 
                         
                         epoch_total_losses.append(total_loss.item())                        
@@ -691,14 +590,7 @@ class DUETProb(ModelBase):
                         writer.add_scalar(f"C) Denormalized NLL per Channel | {name} | Train", avg_train_loss_per_channel[i], epoch)
 
                 if expert_metrics_batch_count > 0:
-                    # --- DEBUG PRINT: Before avg_selection_counts calculation ---
-                    print(f"\n[DEBUG duet_prob.py | Training Loop] Before avg_selection_counts calculation:")
-                    print(f"  sum_selection_counts: {sum_selection_counts}")
-                    if sum_selection_counts is not None:
-                        print(f"    Shape: {sum_selection_counts.shape}, Dtype: {sum_selection_counts.dtype}, Device: {sum_selection_counts.device}")
-                        print(f"    Values: {sum_selection_counts.cpu().numpy()}")
-                    print(f"  expert_metrics_batch_count: {expert_metrics_batch_count}")
-                    # --- END DEBUG PRINT ---
+                    
                     avg_gate_weights_linear = sum_gate_weights_linear / expert_metrics_batch_count if sum_gate_weights_linear is not None else None
                     avg_gate_weights_uni_esn = sum_gate_weights_uni_esn / expert_metrics_batch_count if sum_gate_weights_uni_esn is not None else None
                     avg_gate_weights_multi_esn = sum_gate_weights_multi_esn / expert_metrics_batch_count if sum_gate_weights_multi_esn is not None else None
@@ -706,23 +598,14 @@ class DUETProb(ModelBase):
                 
                 model_to_log = self.model.module if hasattr(self.model, 'module') else self.model
                 
-                # --- KORRIGIERTES, GRUPPIERTES LOGGING --- (Final Version)
+                # --- KORRIGIERTES, GRUPPIERTES LOGGING ---
                 if avg_gate_weights_linear is not None:
-                    print(f"\n[DEBUG duet_prob.py | Training Loop] Logging Linear Expert Weights:")
-                    print(f"  avg_gate_weights_linear: {avg_gate_weights_linear}")
-                    print(f"  Shape: {avg_gate_weights_linear.shape}, Dtype: {avg_gate_weights_linear.dtype}, Device: {avg_gate_weights_linear.device}")
                     for i, weight in enumerate(avg_gate_weights_linear):
                         writer.add_scalar(f"Expert Gating Weights/Linear_Expert_{i}", weight.item(), epoch)
                 if avg_gate_weights_uni_esn is not None:
-                    print(f"\n[DEBUG duet_prob.py | Training Loop] Logging Uni ESN Expert Weights:")
-                    print(f"  avg_gate_weights_uni_esn: {avg_gate_weights_uni_esn}")
-                    print(f"  Shape: {avg_gate_weights_uni_esn.shape}, Dtype: {avg_gate_weights_uni_esn.dtype}, Device: {avg_gate_weights_uni_esn.device}")
                     for i, weight in enumerate(avg_gate_weights_uni_esn):
                         writer.add_scalar(f"Expert Gating Weights/Uni_ESN_Expert_{i}", weight.item(), epoch)
                 if avg_gate_weights_multi_esn is not None:
-                    print(f"\n[DEBUG duet_prob.py | Training Loop] Logging Multi ESN Expert Weights:")
-                    print(f"  avg_gate_weights_multi_esn: {avg_gate_weights_multi_esn}")
-                    print(f"  Shape: {avg_gate_weights_multi_esn.shape}, Dtype: {avg_gate_weights_multi_esn.dtype}, Device: {avg_gate_weights_multi_esn.device}")
                     for i, weight in enumerate(avg_gate_weights_multi_esn):
                         writer.add_scalar(f"Expert Gating Weights/Multi_ESN_Expert_{i}", weight.item(), epoch)
 
@@ -853,14 +736,7 @@ class DUETProb(ModelBase):
                 }
                 self._log_epoch_summary_to_file(summary_metrics)
 
-                # --- DIAGNOSTIC LOG | END OF EPOCH ---
-                print(f"\n[DIAGNOSTIC LOG | END OF EPOCH {epoch + 1}] Expert Signatures:")
-                model_ref = self.model.module if hasattr(self.model, 'module') else self.model
-                for idx, expert in enumerate(model_ref.cluster.experts):
-                    first_param = next(expert.parameters(), None)
-                    if first_param is not None:
-                        print(f"  Expert {idx} ({expert.__class__.__name__}): {_get_tensor_signature(first_param.data)}")
-
+                
         finally:
             print("--- Finalizing run: closing writer. ---")
             if hasattr(self, "early_stopping") and self.early_stopping.path and os.path.exists(self.early_stopping.path):

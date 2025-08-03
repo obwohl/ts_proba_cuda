@@ -184,31 +184,9 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
     def forward(self, input_x: torch.Tensor):
         # input_x: [Batch, SeqLen, NVars]
         
-        # --- NEW DIAGNOSTIC LOGGING ---
-        if self.training: # Only log during training
-            print(f"\n[DIAGNOSTIC LOG | DUETProbModel] Before RevIN:")
-            print(f"  input_x mean: {input_x.mean().item():.6f}, std: {input_x.std().item():.6f}")
-            print(f"  input_x min: {input_x.min().item():.6f}, max: {input_x.max().item():.6f}")
-            print(f"  input_x has nan: {torch.isnan(input_x).any().item()}")
-        # --- END NEW DIAGNOSTIC LOGGING ---
-
         x_for_main_model, stats = self.cluster.revin(input_x, 'norm')
 
-        # --- NEW DIAGNOSTIC LOGGING ---
-        if self.training: # Only log during training
-            print(f"\n[DIAGNOSTIC LOG | DUETProbModel] After RevIN (before nan_to_num):")
-            print(f"  x_for_main_model mean: {x_for_main_model.mean().item():.6f}, std: {x_for_main_model.std().item():.6f}")
-            print(f"  x_for_main_model min: {x_for_main_model.min().item():.6f}, max: {x_for_main_model.max().item():.6f}")
-            print(f"  x_for_main_model has nan: {torch.isnan(x_for_main_model).any().item()}")
-        # --- END NEW DIAGNOSTIC LOGGING ---
-
         x_for_main_model = torch.nan_to_num(x_for_main_model)
-
-        # --- NEW DIAGNOSTIC LOGGING ---
-        if self.training: # Only log during training
-            print(f"\n[DIAGNOSTIC LOG | DUETProbModel] After RevIN (after nan_to_num):")
-            print(f"  x_for_main_model mean: {x_for_main_model.mean().item():.6f}, std: {x_for_main_model.std().item():.6f}")
-        # --- END NEW DIAGNOSTIC LOGGING ---
 
         temporal_feature, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, clean_logits, noisy_logits = self.cluster(x_for_main_model)
 
@@ -250,16 +228,6 @@ class DUETProbModel(nn.Module): # Umbenannt von DUETModel
         base_distr = self.distr_output.distribution(distr_params)
         final_distr = DenormalizingDistribution(base_distr, stats)
 
-        if self.training: # Only log during training
-            print(f"\n[DEBUG DUETProbModel.forward] expert_selection_counts (before return): {expert_selection_counts}")
-            if expert_selection_counts is not None:
-                print(f"  Shape: {expert_selection_counts.shape}, Dtype: {expert_selection_counts.dtype}, Device: {expert_selection_counts.device}")
-                print(f"  Values: {expert_selection_counts.cpu().numpy()}")
-        if self.training: # Only log during training
-            print(f"\n[DEBUG DUETProbModel.forward] expert_selection_counts (before return): {expert_selection_counts}")
-            if expert_selection_counts is not None:
-                print(f"  Shape: {expert_selection_counts.shape}, Dtype: {expert_selection_counts.dtype}, Device: {expert_selection_counts.device}")
-                print(f"  Values: {expert_selection_counts.cpu().numpy()}")
         return final_distr, base_distr, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, p_learned, p_final, clean_logits, noisy_logits
 
     def get_parameter_groups(self):

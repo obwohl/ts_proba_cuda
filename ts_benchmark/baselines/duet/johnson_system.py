@@ -320,12 +320,6 @@ def get_best_johnson_fit(data: np.ndarray) -> str:
     # Find best fit based on lowest BIC
     best_fit_type = min(bics, key=bics.get)
     
-    # Heuristic: Prefer simpler Normal distribution if its fit is very close
-    # if 'SN' in nlls and nlls['SN'] != np.inf and best_fit_type != 'SN':
-    #     best_nll = nlls[best_fit_type]
-    #     norm_nll = nlls['SN']
-    #     if (norm_nll - best_nll) < 0.05 * abs(best_nll): # If within 5% of the best NLL
-    #         best_fit_type = 'SN'
 
     return best_fit_type
 

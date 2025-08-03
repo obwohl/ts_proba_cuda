@@ -8,7 +8,7 @@ import uuid
 import signal
 
 # -- Studien-Konfiguration --
-STUDY_NAME = "preci_short"
+STUDY_NAME = "preci_short_4"
 STORAGE_NAME = "sqlite:///optuna_study.db"  # Fester DB-Name. Studien werden intern durch STUDY_NAME unterschieden.
 
 # -- Parallelisierungs-Konfiguration --

@@ -7,9 +7,6 @@ from .esn.reservoir_expert import UnivariateReservoirExpert, MultivariateReservo
 from einops import rearrange
 from .RevIN import RevIN  # Importiere RevIN
 
-# In linear_extractor_cluster.py
-
-# ... (keep all the imports at the top) ...
 
 class SparseDispatcher(object):
     """
@@ -148,55 +145,25 @@ class Linear_extractor_cluster(nn.Module):
 
 
     def cv_squared(self, x):
-            """
-            Calculates the squared coefficient of variation with full debugging.
-            """
-            print("\n--- START DEBUG CV_SQUARED ---")
-            # 1. Check the input tensor 'x'
-            print(f"Input 'x' shape: {x.shape}, dtype: {x.dtype}, device: {x.device}")
-            print(f"Input 'x' has NaNs: {torch.isnan(x).any().item()}")
-            print(f"Input 'x' values: {x.data}")
+        """
+        Calculates the squared coefficient of variation.
+        """
+        eps = 1e-10
+        if x.numel() < 2:
+            return torch.tensor(0.0, device=x.device, dtype=x.dtype)
 
-            eps = 1e-10
-            if x.numel() < 2:
-                print("-> Path A: Returning 0.0 because numel < 2.")
-                print("--- END DEBUG CV_SQUARED ---\n")
-                return torch.tensor(0.0, device=x.device, dtype=x.dtype)
+        mean = x.float().mean()
 
-            # 2. Calculate the mean
-            mean = x.float().mean()
-            print(f"  Step 1: Calculated mean = {mean.item()}")
+        if torch.isclose(mean, torch.tensor(0.0, device=mean.device), atol=eps):
+            return torch.tensor(0.0, device=x.device, dtype=x.dtype)
 
-            if torch.isclose(mean, torch.tensor(0.0, device=mean.device), atol=eps):
-                print("-> Path B: Returning 0.0 because mean is close to zero.")
-                print("--- END DEBUG CV_SQUARED ---\n")
-                return torch.tensor(0.0, device=x.device, dtype=x.dtype)
-
-            # 3. Calculate the mean of squares
-            mean_sq = (x.float() ** 2).mean()
-            print(f"  Step 2: Calculated mean_sq (E[x^2]) = {mean_sq.item()}")
-
-            # 4. Calculate the denominator
-            denominator = mean.detach()**2 + eps
-            print(f"  Step 3: Denominator (mean.detach()**2 + eps) = {denominator.item()}")
-
-            # 5. Perform the division
-            division_result = mean_sq / denominator
-            print(f"  Step 4: Division result (mean_sq / denominator) = {division_result.item()}")
-
-            # 6. Final subtraction
-            cv_sq = division_result - 1
-            print(f"  Step 5: Final cv_sq (before clamp) = {cv_sq.item()}")
-
-            if torch.isnan(cv_sq):
-                print("!!! CRITICAL: 'cv_sq' is NaN at Step 5!")
-            
-            # 7. Clamp the result
-            result = torch.clamp(cv_sq, min=0.0)
-            print(f"  Step 6: Returned value (after clamp) = {result.item()}")
-            print("--- END DEBUG CV_SQUARED ---\n")
-            
-            return result
+        mean_sq = (x.float() ** 2).mean()
+        denominator = mean.detach()**2 + eps
+        division_result = mean_sq / denominator
+        cv_sq = division_result - 1
+        
+        result = torch.clamp(cv_sq, min=0.0)
+        return result
 
     def _gates_to_load(self, gates):
         return (gates > 0).sum(0)
@@ -226,21 +193,9 @@ class Linear_extractor_cluster(nn.Module):
     def noisy_top_k_gating(self, x, train, noise_epsilon=1e-2, gating_input=None):
         # Use gating_input if provided, otherwise use x
         if gating_input is None:
-            # # --- NEW DIAGNOSTIC LOGGING ---
-            # if self.training: # Only log during training
-            #     print(f"\n[DIAGNOSTIC LOG | GATING] Before gating_input_projection:")
-            #     print(f"  x[:, -1, :] mean: {x[:, -1, :].mean().item():.6f}, std: {x[:, -1, :].std().item():.6f}")
-            #     print(f"  x[:, -1, :] min: {x[:, -1, :].min().item():.6f}, max: {x[:, -1, :].max().item():.6f}")
-            #     print(f"  x[:, -1, :] has nan: {torch.isnan(x[:, -1, :]).any().item()}")
-            # # --- END NEW DIAGNOSTIC LOGGING ---
+            
             context_for_gating = self.gating_input_projection(x[:, -1, :])
-            # # --- NEW DIAGNOSTIC LOGGING ---
-            # if self.training: # Only log during training
-            #     print(f"\n[DIAGNOSTIC LOG | GATING] After gating_input_projection:")
-            #     print(f"  context_for_gating mean: {context_for_gating.mean().item():.6f}, std: {context_for_gating.std().item():.6f}")
-            #     print(f"  context_for_gating min: {context_for_gating.min().item():.6f}, max: {context_for_gating.max().item():.6f}")
-            #     print(f"  context_for_gating has nan: {torch.isnan(context_for_gating).any().item()}")
-            # # --- END NEW DIAGNOSTIC LOGGING ---
+            
         else:
             context_for_gating = gating_input
 
@@ -266,92 +221,33 @@ class Linear_extractor_cluster(nn.Module):
         # Reshape for the gate and noise networks: [batch_size * num_experts, d_model + embedding_dim]
         input_for_gating_flat = input_for_gating_conditioned.view(-1, input_for_gating_conditioned.shape[-1])
 
-        # # --- NEW DIAGNOSTIC LOGGING ---
-        # if self.training: # Only log during training
-        #     print(f"\n[DIAGNOSTIC LOG | GATING] Before self.gate(input_for_gating_flat):")
-        #     print(f"  input_for_gating_flat mean: {input_for_gating_flat.mean().item():.6f}, std: {input_for_gating_flat.std().item():.6f}")
-        #     print(f"  input_for_gating_flat min: {input_for_gating_flat.min().item():.6f}, max: {input_for_gating_flat.max().item():.6f}")
-        #     print(f"  input_for_gating_flat has nan: {torch.isnan(input_for_gating_flat).any().item()}")
-        # # --- END NEW DIAGNOSTIC LOGGING ---
 
         clean_logits_flat = self.gate(input_for_gating_flat)
 
-        # # --- NEW DIAGNOSTIC LOGGING ---
-        # if self.training: # Only log during training
-        #     print(f"\n[DIAGNOSTIC LOG | GATING] After self.gate(input_for_gating_flat) (before nan_to_num):")
-        #     print(f"  clean_logits_flat requires_grad: {clean_logits_flat.requires_grad}")
-        #     if clean_logits_flat.grad_fn:
-        #         print(f"  clean_logits_flat grad_fn: {clean_logits_flat.grad_fn}")
-        #     else:
-        #         print(f"  clean_logits_flat grad_fn: None (This might be expected if it's an input to a non-leaf operation)")
-        #     print(f"  clean_logits_flat mean: {clean_logits_flat.mean().item():.6f}, std: {clean_logits_flat.std().item():.6f}")
-        #     print(f"  clean_logits_flat has nan: {torch.isnan(clean_logits_flat).any().item()}")
-        # # --- END NEW DIAGNOSTIC LOGGING ---
 
         clean_logits_flat = torch.nan_to_num(clean_logits_flat)
 
-        # # --- NEW DIAGNOSTIC LOGGING ---
-        # if self.training: # Only log during training
-        #     print(f"\n[DIAGNOSTIC LOG | GATING] After self.gate(input_for_gating_flat) (after nan_to_num):")
-        #     print(f"  clean_logits_flat mean: {clean_logits_flat.mean().item():.6f}, std: {clean_logits_flat.std().item():.6f}")
-        # # --- END NEW DIAGNOSTIC LOGGING ---
-
 
         if self.noisy_gating and train:
-            # # --- NEW DIAGNOSTIC LOGGING ---
-            # if self.training: # Only log during training
-            #     print(f"\n[DIAGNOSTIC LOG | GATING] Before self.noise(input_for_gating_flat):")
-            #     print(f"  input_for_gating_flat mean: {input_for_gating_flat.mean().item():.6f}, std: {input_for_gating_flat.std().item():.6f}")
-            #     print(f"  input_for_gating_flat min: {input_for_gating_flat.min().item():.6f}, max: {input_for_gating_flat.max().item():.6f}")
-            #     print(f"  input_for_gating_flat has nan: {torch.isnan(input_for_gating_flat).any().item()}")
-            # # --- END NEW DIAGNOSTIC LOGGING ---
+           
 
             raw_noise_logits = self.noise(input_for_gating_flat)
 
-            # # --- NEW DIAGNOSTIC LOGGING ---
-            # if self.training: # Only log during training
-            #     print(f"\n[DIAGNOSTIC LOG | GATING] After self.noise(input_for_gating_flat) (before nan_to_num):")
-            #     print(f"  raw_noise_logits requires_grad: {raw_noise_logits.requires_grad}")
-            #     if raw_noise_logits.grad_fn:
-            #         print(f"  raw_noise_logits grad_fn: {raw_noise_logits.grad_fn}")
-            #     else:
-            #         print(f"  raw_noise_logits grad_fn: None")
-            #     print(f"  raw_noise_logits mean: {raw_noise_logits.mean().item():.6f}, std: {raw_noise_logits.std().item():.6f}")
-            #     print(f"  raw_noise_logits has nan: {torch.isnan(raw_noise_logits).any().item()}")
-            # # --- END NEW DIAGNOSTIC LOGGING ---
+       
 
             raw_noise_logits = torch.nan_to_num(raw_noise_logits)
 
-            # # --- NEW DIAGNOSTIC LOGGING ---
-            # if self.training: # Only log during training
-            #     print(f"\n[DIAGNOSTIC LOG | GATING] After self.noise(input_for_gating_flat) (after nan_to_num):")
-            #     print(f"  raw_noise_logits mean: {raw_noise_logits.mean().item():.6f}, std: {raw_noise_logits.std().item():.6f}")
-            # # --- END NEW DIAGNOSTIC LOGGING ---
+        
 
             noise_stddev_flat = self.softplus(raw_noise_logits) + noise_epsilon
 
-            # # --- NEW DIAGNOSTIC LOGGING ---
-            # if self.training: # Only log during training
-            #     print(f"\n[DIAGNOSTIC LOG | GATING] After noise_stddev_flat calculation:")
-            #     print(f"  noise_stddev_flat mean: {noise_stddev_flat.mean().item():.6f}, std: {noise_stddev_flat.std().item():.6f}")
-            #     print(f"  noise_stddev_flat has nan: {torch.isnan(noise_stddev_flat).any().item()}")
-            # # --- END NEW DIAGNOSTIC LOGGING ---
+           
 
             noisy_logits_flat = clean_logits_flat + (torch.randn_like(clean_logits_flat) * noise_stddev_flat)
         else:
             noisy_logits_flat = clean_logits_flat
 
-        # # --- NEW DIAGNOSTIC LOGGING ---
-        # if self.training: # Only log during training
-        #     print(f"\n[DIAGNOSTIC LOG | GATING] Before topk and softmax:")
-        #     print(f"  noisy_logits_flat requires_grad: {noisy_logits_flat.requires_grad}")
-        #     if noisy_logits_flat.grad_fn:
-        #         print(f"  noisy_logits_flat grad_fn: {noisy_logits_flat.grad_fn}")
-        #     else:
-        #         print(f"  noisy_logits_flat grad_fn: None")
-        #     print(f"  noisy_logits_flat mean: {noisy_logits_flat.mean().item():.6f}, std: {noisy_logits_flat.std().item():.6f}")
-        #     print(f"  noisy_logits_flat has nan: {torch.isnan(noisy_logits_flat).any().item()}")
-        # # --- END NEW DIAGNOSTIC LOGGING ---
+      
 
         # Reshape noise_stddev to [batch_size, num_experts]
         if self.noisy_gating and train:
@@ -399,12 +295,6 @@ class Linear_extractor_cluster(nn.Module):
 
         loss_importance = torch.clamp(loss_importance, max=1000.0)
 
-
-        # # --- HIER DEN DEBUG-CODE EINFÜGEN ---
-        # print(f"\n>>> DEBUG-AUSGABE <<<")
-        # print(f"Form des Inputs 'x' für den Dispatcher: {x.shape}")
-        # print(f"Form des 'gates'-Tensors: {gates.shape}")
-        # print(f">>> ENDE DEBUG-AUSGABE <<<\n")
         
         dispatcher = SparseDispatcher(self.num_experts, gates)
         expert_inputs = dispatcher.dispatch(x)
