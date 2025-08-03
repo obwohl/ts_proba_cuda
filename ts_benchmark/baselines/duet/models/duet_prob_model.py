@@ -230,7 +230,7 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
         else: # For ZIEGPD_M1 and potentially others that model the original scale
             final_distr = base_distr
 
-        return final_distr, base_distr, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, p_learned, p_final, clean_logits, noisy_logits
+        return final_distr, base_distr, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, p_learned, p_final, clean_logits, noisy_logits, distr_params
 
     def get_parameter_groups(self):
         """

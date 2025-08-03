@@ -57,7 +57,7 @@ FIXED_PARAMS = {
     "max_memory_gb": None,
     "profile_epoch": 0,
     # NEU: Schalter zum Deaktivieren der speicherintensiven Plots während der Optuna-Suche.
-    "enable_diagnostic_plots": False,
+    "enable_diagnostic_plots": True,
     # "channel_adjacency_prior": [ isarpegel
     #     [1, 1, 0, 0, 0, 0],  
     #     [1, 1, 0, 0, 0, 0],

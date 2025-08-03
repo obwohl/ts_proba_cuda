@@ -310,7 +310,7 @@ class DUETProb(ModelBase):
                     input_data = input_sample_tensor.float().unsqueeze(0).to(device)
                     actuals_data = actuals_data_tensor.float().unsqueeze(0).to(device)
                     
-                    denorm_distr, _, _, _, _, _, _, _, _, _, _ = self.model(input_data)
+                    denorm_distr, base_distr, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, expert_selection_counts, p_learned, p_final, clean_logits, noisy_logits, distr_params = self.model(input_data)
 
                     nll_per_point = -denorm_distr.log_prob(actuals_data)
                             
@@ -321,7 +321,11 @@ class DUETProb(ModelBase):
                     except (ValueError, AttributeError):
                         nll_val = nll_per_point.mean().item()
                         
-                    avg_stddev = denorm_distr.stddev.mean().item()
+                    try:
+                        avg_stddev = denorm_distr.stddev.mean().item()
+                    except NotImplementedError:
+                        avg_stddev = float('nan')
+                        print(f"WARNING: stddev not implemented for {self.config.distribution_family} distribution. Skipping avg_stddev calculation for diagnostic plots.")
 
                     fig = self._create_window_plot(
                         history=input_sample_tensor.cpu().numpy(),
@@ -331,9 +335,47 @@ class DUETProb(ModelBase):
                         title=f'{channel_name} | {method_name} | NLL: {nll_val:.2f} | AvgStdDev: {avg_stddev:.2f}'
                     )
                             
-                    tag = f"Hard_Windows | {channel_name} | {method_name}"
+                    tag = f"Hard Windows/{channel_name}/{method_name}"
                     writer.add_figure(tag, fig, global_step=epoch)
                     plt.close(fig)
+
+                    # Plot distribution parameters if ZIEGPD_M1
+                    if self.config.distribution_family == "ZIEGPD_M1":
+                        # distr_params shape: [B, N_vars, H, P]
+                        # We need to select the current channel and squeeze the batch dimension
+                        channel_names = list(self.config.channel_bounds.keys())
+                        channel_idx = channel_names.index(channel_name)
+                        
+                        # Select parameters for the current channel and squeeze batch dim
+                        params_for_channel = distr_params[0, channel_idx, :, :]
+                        
+                        # Unpack parameters: pi, kappa, sigma, xi
+                        pi_raw, kappa_raw, sigma_raw, xi = torch.chunk(params_for_channel, chunks=4, dim=-1)
+
+                        # Apply sigmoid to pi_raw to get actual pi probability
+                        pi = torch.sigmoid(pi_raw).squeeze(-1).cpu().numpy()
+                        kappa = kappa_raw.squeeze(-1).cpu().numpy()
+                        sigma = sigma_raw.squeeze(-1).cpu().numpy()
+                        xi = xi.squeeze(-1).cpu().numpy()
+
+                        # Plot each parameter
+                        param_plots = {
+                            "pi": pi,
+                            "kappa": kappa,
+                            "sigma": sigma,
+                            "xi": xi
+                        }
+
+                        for param_name, param_values in param_plots.items():
+                            param_fig = self._create_parameter_plot(
+                                param_values=param_values,
+                                param_name=param_name,
+                                channel_name=channel_name,
+                                method_name=method_name
+                            )
+                            param_tag = f"Hard Windows Params/{channel_name}/{method_name}/{param_name}"
+                            writer.add_figure(param_tag, param_fig, global_step=epoch)
+                            plt.close(param_fig)
 
         self.model.train()
 
@@ -488,17 +530,15 @@ class DUETProb(ModelBase):
                         input_data = input_data.to(device)
                         target = target.to(device)
                         
-                        denorm_distr, base_distr, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, batch_selection_counts, p_learned, p_final, clean_logits, noisy_logits = self.model(input_data)
+                        denorm_distr, base_distr, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, batch_selection_counts, p_learned, p_final, clean_logits, noisy_logits, distr_params = self.model(input_data)
                         
                         target_horizon = target[:, -config.horizon:, :]
 
                         if self.config.distribution_family == "Johnson":
-                            # For Johnson, loss is on the normalized distribution
                             norm_target = denorm_distr.normalize_value(target_horizon).permute(0, 2, 1)
                             log_probs = base_distr.log_prob(norm_target)
                             nll_loss = -log_probs.mean()
                         else:
-                            # For ZIEGPD, loss is on the final (denormalized) distribution
                             log_probs = denorm_distr.log_prob(target_horizon)
                             nll_loss = -log_probs.mean()
 
@@ -507,7 +547,6 @@ class DUETProb(ModelBase):
                         total_loss = nll_loss + config.loss_coef * loss_importance
 
                         with torch.no_grad():
-                            # This loss is always on the final, potentially denormalized distribution
                             denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
                             epoch_denorm_losses_per_channel.append(denorm_loss_per_sample.cpu().numpy())
 
@@ -578,35 +617,31 @@ class DUETProb(ModelBase):
                             current_memory_check_interval = regular_memory_check_interval_seconds
 
 
-                avg_train_total_loss = np.mean(epoch_total_losses)
-                avg_train_norm_loss = np.mean(epoch_normalized_losses)
-                avg_train_importance_loss = np.mean(epoch_importance_losses)
+                avg_train_total_loss = np.mean(epoch_total_losses) if epoch_total_losses else float('nan')
+                avg_train_norm_loss = np.mean(epoch_normalized_losses) if epoch_normalized_losses else float('nan')
+                avg_train_importance_loss = np.mean(epoch_importance_losses) if epoch_importance_losses else float('nan')
                 
-                writer.add_scalar("A) Overall Loss (for Optimizer) | Train_Total_Loss (NLL+MoE)", avg_train_total_loss, epoch)
-                writer.add_scalar("A) Overall Loss (for Optimizer) | Train_NLL", avg_train_norm_loss, epoch)
-                writer.add_scalar("A) Overall Loss (for Optimizer) | Train_MoE_Importance_Loss", avg_train_importance_loss, epoch)
-
+            
+                writer.add_scalar("Loss/Train/Total (NLL+MoE)", avg_train_total_loss, epoch)
+                writer.add_scalar("Loss/Train/NLL", avg_train_norm_loss, epoch)
+                writer.add_scalar("Loss/Train/MoE_Importance", avg_train_importance_loss, epoch)
                 if epoch_denorm_losses_per_channel:
                     all_train_losses_denorm = np.concatenate(epoch_denorm_losses_per_channel, axis=0)
                     
                     avg_train_loss_all_channels = np.mean(all_train_losses_denorm)
-                    writer.add_scalar("B) Denormalized NLL (Evaluation) | Train_Avg_AllChannels", avg_train_loss_all_channels, epoch)
+                    writer.add_scalar("Denormalized NLL/Train/AllChannels_Avg", avg_train_loss_all_channels, epoch)
 
                     avg_train_loss_per_channel = np.mean(all_train_losses_denorm, axis=0)
                     channel_names = list(self.config.channel_bounds.keys())
                     for i, name in enumerate(channel_names):
-                        writer.add_scalar(f"C) Denormalized NLL per Channel | {name} | Train", avg_train_loss_per_channel[i], epoch)
+                        writer.add_scalar(f"Denormalized NLL per Channel/Train/{name}", avg_train_loss_per_channel[i], epoch)
 
                 if expert_metrics_batch_count > 0:
-                    
                     avg_gate_weights_linear = sum_gate_weights_linear / expert_metrics_batch_count if sum_gate_weights_linear is not None else None
                     avg_gate_weights_uni_esn = sum_gate_weights_uni_esn / expert_metrics_batch_count if sum_gate_weights_uni_esn is not None else None
-                    avg_gate_weights_multi_esn = sum_gate_weights_multi_esn / expert_metrics_batch_count if sum_gate_weights_multi_esn is not None else None
-                    avg_selection_counts = sum_selection_counts / expert_metrics_batch_count if sum_selection_counts is not None else torch.tensor([])
+                    avg_gate_weights_multi_esn = sum_gate_weights_multi_esn / expert_metrics_batch_count if sum_gate_weights_multi_esn is not None else torch.tensor([])
+                    avg_selection_counts = sum_selection_counts / expert_metrics_batch_count if sum_selection_counts is not None else None
                 
-                model_to_log = self.model.module if hasattr(self.model, 'module') else self.model
-                
-                # --- KORRIGIERTES, GRUPPIERTES LOGGING ---
                 if avg_gate_weights_linear is not None:
                     for i, weight in enumerate(avg_gate_weights_linear):
                         writer.add_scalar(f"Expert Gating Weights/Linear_Expert_{i}", weight.item(), epoch)
@@ -617,7 +652,7 @@ class DUETProb(ModelBase):
                     for i, weight in enumerate(avg_gate_weights_multi_esn):
                         writer.add_scalar(f"Expert Gating Weights/Multi_ESN_Expert_{i}", weight.item(), epoch)
 
-                if avg_selection_counts.numel() > 0:
+                if avg_selection_counts is not None and avg_selection_counts.numel() > 0:
                     expert_idx = 0
                     for i in range(config.num_linear_experts):
                         writer.add_scalar(f"Expert Gating Counts/Linear_{i}", avg_selection_counts[expert_idx].item(), epoch)
@@ -641,7 +676,7 @@ class DUETProb(ModelBase):
                     channel_names = list(self.config.channel_bounds.keys())
                     for i, name in enumerate(channel_names):
                         avg_channel_loss = np.mean(all_window_losses_denorm[:, i])
-                        writer.add_scalar(f"C) Denormalized NLL per Channel | {name} | Validation", avg_channel_loss, epoch)
+                        writer.add_scalar(f"Denormalized NLL per Channel/Validation/{name}", avg_channel_loss, epoch)
 
                     target_channel = getattr(self.config, 'optimization_target_channel', None)
                     optimization_target_name_for_log = ""
@@ -665,11 +700,10 @@ class DUETProb(ModelBase):
                     cvar_metric_for_opt = calculate_cvar(losses_for_optimization, self.config.cvar_alpha)
 
                     overall_avg_nll = np.mean(all_window_losses_denorm)
-                    overall_cvar_nll = calculate_cvar(all_window_losses_denorm.mean(axis=1), self.config.cvar_alpha)
-                    if target_channel and target_channel in channel_names:
-                        writer.add_scalar(f"Loss_Target_{target_channel} | Validation_Avg_NLL", avg_metric_for_opt, epoch)
-                        writer.add_scalar(f"Loss_Target_{target_channel} | Validation_CVaR_NLL", cvar_metric_for_opt, epoch)
 
+                    if target_channel and target_channel in channel_names:
+                        writer.add_scalar(f"Optimization Metric/{target_channel}/Validation_Avg_NLL", avg_metric_for_opt, epoch)
+                        writer.add_scalar(f"Optimization Metric/{target_channel}/Validation_CVaR_NLL", cvar_metric_for_opt, epoch)
 
                     if self.config.optimization_metric == 'cvar':
                         metric_for_optimization = cvar_metric_for_opt
@@ -678,7 +712,7 @@ class DUETProb(ModelBase):
                         metric_for_optimization = avg_metric_for_opt
                         metric_name_for_logging = "Avg NLL"
 
-                    writer.add_scalar(f"Loss_Optimized | Validation_Metric", metric_for_optimization, epoch)
+                    writer.add_scalar(f"Optimization Metric/Final_Validation_Metric", metric_for_optimization, epoch)
 
                     log_msg = (f"Epoch {epoch + 1} Validation | Overall Avg NLL: {overall_avg_nll:.6f} | "
                                f"Optimierungs-Metrik ({optimization_target_name_for_log}): {metric_name_for_logging} = {metric_for_optimization:.6f} --> Für Early Stopping & Pruning verwendet.")
@@ -713,7 +747,7 @@ class DUETProb(ModelBase):
                                     learned_matrix=avg_p_learned.cpu().numpy(),
                                     final_matrix=avg_p_final.cpu().numpy()
                                 )
-                                writer.add_figure("Channel_Dependencies | Combined_View", fig_dependencies, global_step=epoch)
+                                writer.add_figure("Channel Dependencies/Combined_View", fig_dependencies, global_step=epoch)
                                 plt.close(fig_dependencies)
 
                     if self.early_stopping.early_stop:
@@ -729,7 +763,7 @@ class DUETProb(ModelBase):
                     print(f"Trial timed out after {(time.time() - start_time):.2f}s (max: {max_training_time}s).")
                     break
                 
-                writer.add_scalar("Misc | Learning_Rate", optimizer.param_groups[0]['lr'], epoch)
+                writer.add_scalar("Misc/Learning_Rate", optimizer.param_groups[0]['lr'], epoch)
                 writer.flush()
 
                 epoch_duration = time.time() - epoch_start_time
@@ -744,7 +778,6 @@ class DUETProb(ModelBase):
                 }
                 self._log_epoch_summary_to_file(summary_metrics)
 
-                
         finally:
             print("--- Finalizing run: closing writer. ---")
             if hasattr(self, "early_stopping") and self.early_stopping.path and os.path.exists(self.early_stopping.path):
@@ -800,16 +833,15 @@ Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
                 
                 target_horizon = target[:, -self.config.horizon:, :]
 
-                denorm_distr, base_distr, _, _, _, _, _, _, _, _, _ = self.model(input_data)
+                denorm_distr, base_distr, _, _, _, _, _, _, _, _, _, _ = self.model(input_data)
                 
                 if self.config.distribution_family == "Johnson":
                     denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
                     norm_target = denorm_distr.normalize_value(target_horizon).permute(0, 2, 1)
                     norm_loss_per_sample = -base_distr.log_prob(norm_target).mean(dim=2)
                 else:
-                    # For ZIEGPD, both losses are the same, calculated on the final distribution
                     denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
-                    norm_loss_per_sample = denorm_loss_per_sample # Or recalculate, but this is efficient
+                    norm_loss_per_sample = denorm_loss_per_sample
 
                 all_denorm_losses.append(denorm_loss_per_sample.cpu().numpy())
                 all_norm_losses.append(norm_loss_per_sample.cpu().numpy())
@@ -843,7 +875,7 @@ Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
         
         self.model.eval()
         with torch.no_grad():
-            distr, _, _, _, _, _, _, _, _, _, _ = self.model(input_tensor)
+            distr, _, _, _, _, _, _, _, _, _, _, _ = self.model(input_tensor)
             
             q_list = self.config.quantiles
             q_tensor = torch.tensor(q_list, device=device, dtype=torch.float32)
@@ -854,11 +886,6 @@ Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
         return output_array
 
     def load(self, checkpoint_path: str) -> "ModelBase":
-        """
-        Loads a model's state_dict from a checkpoint file.
-        This method assumes the model architecture has already been initialized.
-        It does NOT load the configuration from the checkpoint.
-        """
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found at: {checkpoint_path}")
         
@@ -876,9 +903,6 @@ Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
         return self
 
     def _create_window_plot(self, history, actuals, prediction_dist, channel_name, title):
-        """
-        Erstellt eine Matplotlib-Figur für ein einzelnes Fenster.
-        """
         fig, ax = plt.subplots(figsize=(12, 6))
 
         try:
@@ -898,7 +922,12 @@ Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
         actuals_y = actuals[:, channel_idx]
         
         quantiles = self.config.quantiles
-        device = prediction_dist.mean.device
+        
+        try:
+            device = prediction_dist.mean.device
+        except NotImplementedError:
+            device = next(self.model.parameters()).device
+            
         q_tensor = torch.tensor(quantiles, device=device, dtype=torch.float32)
 
         quantile_preds_full = prediction_dist.icdf(q_tensor).squeeze(0).cpu().numpy()
@@ -986,4 +1015,21 @@ Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
         im3 = self._plot_single_heatmap(axes[2], final_matrix, "Effective (Constrained)", channel_names, vmin=0, vmax=1)
         fig.colorbar(im3, ax=axes[2], fraction=0.046, pad=0.04)
 
+        return fig
+        
+    def _create_parameter_plot(self, param_values: np.ndarray, param_name: str, channel_name: str, method_name: str):
+        """
+        Creates a Matplotlib figure for a single distribution parameter over the forecast horizon.
+        """
+        fig, ax = plt.subplots(figsize=(10, 5))
+        horizon_len = len(param_values)
+        forecast_x = np.arange(horizon_len)
+
+        ax.plot(forecast_x, param_values, marker='o', linestyle='-', color='blue')
+        ax.set_title(f'{channel_name} | {method_name} | Parameter: {param_name}')
+        ax.set_xlabel("Forecast Step")
+        ax.set_ylabel(param_name.capitalize())
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+        plt.tight_layout()
         return fig
