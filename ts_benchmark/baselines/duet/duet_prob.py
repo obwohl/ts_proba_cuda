@@ -492,63 +492,63 @@ class DUETProb(ModelBase):
                         target = target.to(device)
                         
                         denorm_distr, base_distr, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, batch_selection_counts, p_learned, p_final, clean_logits, noisy_logits = self.model(input_data)
-                        # --- DEBUG PRINT: After model output unpacking ---
-                        if self.model.training:
-                            print(f"\n[DEBUG duet_prob.py | Training Loop] batch_selection_counts after model call: {batch_selection_counts}")
-                            if batch_selection_counts is not None:
-                                print(f"  Shape: {batch_selection_counts.shape}, Dtype: {batch_selection_counts.dtype}, Device: {batch_selection_counts.device}")
-                                print(f"  Values: {batch_selection_counts.cpu().numpy()}")
-                        # --- END DEBUG PRINT ---
+                        # # --- DEBUG PRINT: After model output unpacking ---
+                        # if self.model.training:
+                        #     print(f"\n[DEBUG duet_prob.py | Training Loop] batch_selection_counts after model call: {batch_selection_counts}")
+                        #     if batch_selection_counts is not None:
+                        #         print(f"  Shape: {batch_selection_counts.shape}, Dtype: {batch_selection_counts.dtype}, Device: {batch_selection_counts.device}")
+                        #         print(f"  Values: {batch_selection_counts.cpu().numpy()}")
+                        # # --- END DEBUG PRINT ---
                         
-                        # --- DIAGNOSTIC LOG | POINT C ---
-                        if epoch == 0 and not logged_point_c:
-                            print("\n[DIAGNOSTIC LOG | POINT C] After 1st forward() pass:")
-                            print(f"  Clean Logits (after model call): {clean_logits.shape if clean_logits is not None else None}")
-                            print(f"  Noisy Logits (after model call): {noisy_logits.shape if noisy_logits is not None else None}")
-                            model_ref = self.model.module if hasattr(self.model, 'module') else self.model
-                            for idx, expert in enumerate(model_ref.cluster.experts):
-                                first_param = next(expert.parameters(), None)
-                                if first_param is not None:
-                                    print(f"  Expert {idx} ({expert.__class__.__name__}): {_get_tensor_signature(first_param.data)}")
-                            logged_point_c = True
+                        # # --- DIAGNOSTIC LOG | POINT C ---
+                        # if epoch == 0 and not logged_point_c:
+                        #     print("\n[DIAGNOSTIC LOG | POINT C] After 1st forward() pass:")
+                        #     print(f"  Clean Logits (after model call): {clean_logits.shape if clean_logits is not None else None}")
+                        #     print(f"  Noisy Logits (after model call): {noisy_logits.shape if noisy_logits is not None else None}")
+                        #     model_ref = self.model.module if hasattr(self.model, 'module') else self.model
+                        #     for idx, expert in enumerate(model_ref.cluster.experts):
+                        #         first_param = next(expert.parameters(), None)
+                        #         if first_param is not None:
+                        #             print(f"  Expert {idx} ({expert.__class__.__name__}): {_get_tensor_signature(first_param.data)}")
+                        #     logged_point_c = True
 
-                        # --- DIAGNOSTIC LOG | POINT E (Moved) ---
-                        if epoch == 0 and (i + 1) % accumulation_steps == 0: # Log only once per batch accumulation
-                            print("\n[DIAGNOSTIC LOG | POINT E] Gating Network Gradients (after forward pass and before optimizer.step()):")
-                            model_ref = self.model.module if hasattr(self.model, 'module') else self.model
-                            gate_weight = model_ref.cluster.gate.distribution_fit[0].weight
-                            noise_weight = model_ref.cluster.noise.distribution_fit[0].weight
+                        # # --- DIAGNOSTIC LOG | POINT E (Moved) ---
+                        # if epoch == 0 and (i + 1) % accumulation_steps == 0: # Log only once per batch accumulation
+                        #     print("\n[DIAGNOSTIC LOG | POINT E] Gating Network Gradients (after forward pass and before optimizer.step()):")
+                        #     model_ref = self.model.module if hasattr(self.model, 'module') else self.model
+                        #     gate_weight = model_ref.cluster.gate.distribution_fit[0].weight
+                        #     noise_weight = model_ref.cluster.noise.distribution_fit[0].weight
                             
-                            # Check gradients of clean_logits and noisy_logits
-                            if clean_logits.grad is not None:
-                                print(f"  Clean Logits Grad Norm: {clean_logits.grad.norm().item():.6f}")
-                                print(f"  Clean Logits Grad Mean: {clean_logits.grad.mean().item():.6f}")
-                                print(f"  Clean Logits Grad Std: {clean_logits.grad.std().item():.6f}")
-                            else:
-                                print("  Clean Logits Grad: None")
+                        #     # Check gradients of clean_logits and noisy_logits
+                        #     if clean_logits.grad is not None:
+                        #         print(f"  Clean Logits Grad Norm: {clean_logits.grad.norm().item():.6f}")
+                        #         print(f"  Clean Logits Grad Mean: {clean_logits.grad.mean().item():.6f}")
+                        #         print(f"  Clean Logits Grad Std: {clean_logits.grad.std().item():.6f}")
+                        #     else:
+                        #         print("  Clean Logits Grad: None")
 
-                            if self.config.noisy_gating and noisy_logits.grad is not None:
-                                print(f"  Noisy Logits Grad Norm: {noisy_logits.grad.norm().item():.6f}")
-                                print(f"  Noisy Logits Grad Mean: {noisy_logits.grad.mean().item():.6f}")
-                                print(f"  Noisy Logits Grad Std: {noisy_logits.grad.std().item():.6f}")
-                            else:
-                                print("  Noisy Logits Grad: None")
+                        #     if self.config.noisy_gating and noisy_logits.grad is not None:
+                        #         print(f"  Noisy Logits Grad Norm: {noisy_logits.grad.norm().item():.6f}")
+                        #         print(f"  Noisy Logits Grad Mean: {noisy_logits.grad.mean().item():.6f}")
+                        #         print(f"  Noisy Logits Grad Std: {noisy_logits.grad.std().item():.6f}")
+                        #     else:
+                        #         print("  Noisy Logits Grad: None")
 
-                            if gate_weight.grad is not None:
-                                print(f"  Gate Weight Grad Norm: {gate_weight.grad.norm().item():.6f}")
-                                print(f"  Gate Weight Grad Mean: {gate_weight.grad.mean().item():.6f}")
-                                print(f"  Gate Weight Grad Std: {gate_weight.grad.std().item():.6f}")
-                            else:
-                                print("  Gate Weight Grad: None")
-                            if noise_weight.grad is not None:
-                                print(f"  Noise Weight Grad Norm: {noise_weight.grad.norm().item():.6f}")
-                                print(f"  Noise Weight Grad Mean: {noise_weight.grad.mean().item():.6f}")
-                                print(f"  Noise Weight Grad Std: {noise_weight.grad.std().item():.6f}")
-                            else:
-                                print("  Noise Weight Grad: None")
-                            # Log the actual weights as well to see if they are changing
-                            print(f"  Gate Weight Probe[0]: {gate_weight.view(-1)[0].item():.6f}")
-                            print(f"  Noise Weight Probe[0]: {noise_weight.view(-1)[0].item():.6f}")
+                        #     if gate_weight.grad is not None:
+                        #         print(f"  Gate Weight Grad Norm: {gate_weight.grad.norm().item():.6f}")
+                        #         print(f"  Gate Weight Grad Mean: {gate_weight.grad.mean().item():.6f}")
+                        #         print(f"  Gate Weight Grad Std: {gate_weight.grad.std().item():.6f}")
+                        #     else:
+                        #         print("  Gate Weight Grad: None")
+                        #     if noise_weight.grad is not None:
+                        #         print(f"  Noise Weight Grad Norm: {noise_weight.grad.norm().item():.6f}")
+                        #         print(f"  Noise Weight Grad Mean: {noise_weight.grad.mean().item():.6f}")
+                        #         print(f"  Noise Weight Grad Std: {noise_weight.grad.std().item():.6f}")
+                        #     else:
+                        #         print("  Noise Weight Grad: None")
+                        #     # Log the actual weights as well to see if they are changing
+                        #     print(f"  Gate Weight Probe[0]: {gate_weight.view(-1)[0].item():.6f}")
+                        #     print(f"  Noise Weight Probe[0]: {noise_weight.view(-1)[0].item():.6f}")
 
                         target_horizon = target[:, -config.horizon:, :]
                         
@@ -708,14 +708,23 @@ class DUETProb(ModelBase):
                 
                 # --- KORRIGIERTES, GRUPPIERTES LOGGING --- (Final Version)
                 if avg_gate_weights_linear is not None:
+                    print(f"\n[DEBUG duet_prob.py | Training Loop] Logging Linear Expert Weights:")
+                    print(f"  avg_gate_weights_linear: {avg_gate_weights_linear}")
+                    print(f"  Shape: {avg_gate_weights_linear.shape}, Dtype: {avg_gate_weights_linear.dtype}, Device: {avg_gate_weights_linear.device}")
                     for i, weight in enumerate(avg_gate_weights_linear):
-                        writer.add_scalar(f"Expert Gating Weights/Linear_{i}", weight.item(), epoch)
+                        writer.add_scalar(f"Expert Gating Weights/Linear_Expert_{i}", weight.item(), epoch)
                 if avg_gate_weights_uni_esn is not None:
+                    print(f"\n[DEBUG duet_prob.py | Training Loop] Logging Uni ESN Expert Weights:")
+                    print(f"  avg_gate_weights_uni_esn: {avg_gate_weights_uni_esn}")
+                    print(f"  Shape: {avg_gate_weights_uni_esn.shape}, Dtype: {avg_gate_weights_uni_esn.dtype}, Device: {avg_gate_weights_uni_esn.device}")
                     for i, weight in enumerate(avg_gate_weights_uni_esn):
-                        writer.add_scalar(f"Expert Gating Weights/ESN_univariate_{i}", weight.item(), epoch)
+                        writer.add_scalar(f"Expert Gating Weights/Uni_ESN_Expert_{i}", weight.item(), epoch)
                 if avg_gate_weights_multi_esn is not None:
+                    print(f"\n[DEBUG duet_prob.py | Training Loop] Logging Multi ESN Expert Weights:")
+                    print(f"  avg_gate_weights_multi_esn: {avg_gate_weights_multi_esn}")
+                    print(f"  Shape: {avg_gate_weights_multi_esn.shape}, Dtype: {avg_gate_weights_multi_esn.dtype}, Device: {avg_gate_weights_multi_esn.device}")
                     for i, weight in enumerate(avg_gate_weights_multi_esn):
-                        writer.add_scalar(f"Expert Gating Weights/ESN_multivariate_{i}", weight.item(), epoch)
+                        writer.add_scalar(f"Expert Gating Weights/Multi_ESN_Expert_{i}", weight.item(), epoch)
 
                 if avg_selection_counts.numel() > 0:
                     expert_idx = 0
