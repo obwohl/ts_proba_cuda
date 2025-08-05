@@ -181,12 +181,16 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
 
     def forward(self, input_x: torch.Tensor):
         # input_x: [Batch, SeqLen, NVars]
-        
+
         x_for_main_model, stats = self.cluster.revin(input_x, 'norm')
 
         x_for_main_model = torch.nan_to_num(x_for_main_model)
+        # print(f"DEBUG: x_for_main_model | Shape: {x_for_main_model.shape} | Mean: {x_for_main_model.mean():.4f} | Std: {x_for_main_model.std():.4f} | Min: {x_for_main_model.min():.4f} | Max: {x_for_main_model.max():.4f}")
 
         temporal_feature, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, clean_logits, noisy_logits = self.cluster(x_for_main_model)
+        # print(f"DEBUG: temporal_feature | Shape: {temporal_feature.shape} | Mean: {temporal_feature.mean():.4f} | Std: {temporal_feature.std():.4f} | Min: {temporal_feature.min():.4f} | Max: {temporal_feature.max():.4f}")
+        # print(f"DEBUG: clean_logits | Shape: {clean_logits.shape} | Mean: {clean_logits.mean():.4f} | Std: {clean_logits.std():.4f} | Min: {clean_logits.min():.4f} | Max: {clean_logits.max():.4f}")
+        # print(f"DEBUG: noisy_logits | Shape: {noisy_logits.shape} | Mean: {noisy_logits.mean():.4f} | Std: {noisy_logits.std():.4f} | Min: {noisy_logits.min():.4f} | Max: {noisy_logits.max():.4f}")
 
         temporal_feature = rearrange(temporal_feature, 'b d n -> b n d')
         
@@ -204,12 +208,14 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
             if self.n_vars == 1:
                 p_learned = torch.ones(input_x.shape[0], 1, 1, device=input_x.device)
                 p_final = torch.ones(input_x.shape[0], 1, 1, device=input_x.device)
+        # print(f"DEBUG: channel_group_feature | Shape: {channel_group_feature.shape} | Mean: {channel_group_feature.mean():.4f} | Std: {channel_group_feature.std():.4f} | Min: {channel_group_feature.min():.4f} | Max: {channel_group_feature.max():.4f}")
 
 
         distr_params_list = []
         for i, name in enumerate(self.channel_names):
             channel_feature = channel_group_feature[:, i, :]
             raw_params = self.projection_heads[name](channel_feature)
+            # print(f"DEBUG: raw_params (Channel {name}) | Shape: {raw_params.shape} | Mean: {raw_params.mean():.4f} | Std: {raw_params.std():.4f} | Min: {raw_params.min():.4f} | Max: {raw_params.max():.4f}")
 
             # The tanh activation is removed. Parameter constraints are now handled
             # by the distribution-specific output classes (e.g., JohnsonOutput)
@@ -224,11 +230,8 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
 
         base_distr = self.distr_output.distribution(distr_params, self.horizon)
 
-        # Conditionally wrap the distribution for denormalization
-        if self.config.distribution_family == "Johnson":
-            final_distr = DenormalizingDistribution(base_distr, stats)
-        else: # For ZIEGPD_M1 and potentially others that model the original scale
-            final_distr = base_distr
+        # Always wrap the distribution for denormalization
+        final_distr = DenormalizingDistribution(base_distr, stats)
 
         return final_distr, base_distr, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, p_learned, p_final, clean_logits, noisy_logits, distr_params
 

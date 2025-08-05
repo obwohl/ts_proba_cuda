@@ -110,13 +110,7 @@ class Linear_extractor_cluster(nn.Module):
         # verschiedenen Expertentypen (linear, uni-esn, multi-esn).
         self.experts = create_experts(config)
 
-        # Füge die RevIN-Schicht hinzu
-        self.revin = RevIN(
-            num_features=config.enc_in,
-            # Der norm_mode steuert die Art der Normalisierung.
-            # 'subtract_median' ist das neue bevorzugte Verhalten.
-            norm_mode=getattr(config, 'norm_mode', 'subtract_median')
-        )
+        
 
         self.gate = encoder(config, num_experts=self.num_experts, input_dim=config.d_model)
         self.noise = encoder(config, num_experts=self.num_experts, input_dim=config.d_model)
@@ -124,6 +118,7 @@ class Linear_extractor_cluster(nn.Module):
         self.softmax = nn.Softmax(1)
         self.register_buffer("mean", torch.tensor([0.0]))
         self.register_buffer("std", torch.tensor([1.0]))
+        self.revin = RevIN(config.enc_in, affine=True) # Initialize RevIN
         # Stelle sicher, dass k nicht größer als die Anzahl der Experten ist.
         if self.num_experts > 0:
             self.k = min(self.k, self.num_experts)

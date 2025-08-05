@@ -16,13 +16,13 @@ except ImportError:
 
 # ========================== KONFIGURATION ==========================
 # Pfad zur CSV-Datei mit den Zeitreihendaten
-DATA_FILE_PATH = "dataset/forecasting/eisbach_airtemp96_pressure96.csv"
+DATA_FILE_PATH = "dataset/forecasting/preci_large.csv"
 
 # --- Konfiguration für den Lomb-Scargle-Test ---
 # Signifikanzniveau für die "False Alarm Probability" (FAP).
 # 0.0001 bedeutet: Wir akzeptieren nur Peaks, bei denen die Wahrscheinlichkeit,
 # dass sie durch reines Rauschen entstanden sind, unter 0.01% liegt.
-FAP_LEVEL = 0.00001
+FAP_LEVEL = 0.01
 
 # --- Filter für die Periodenlänge ---
 # Plausibler Bereich für Perioden (in Stunden), die wir überhaupt betrachten.
@@ -165,7 +165,7 @@ if __name__ == "__main__":
         # Sortiere die CSV-Ausgabe nach Kanal und dem neuen SNR für bessere Lesbarkeit
         output_csv_path = "significant_periods_summary_all.csv"
         summary_df.sort_values(by=['channel', 'SNR'], ascending=[True, False]).to_csv(
-            output_csv_path, index=False, float_format='%.2f'
+            output_csv_path, index=False, float_format='%.6f'
         )
         
         print(f"Analyse abgeschlossen. Eine Zusammenfassung aller lokal dominanten Perioden wurde gespeichert:\n  -> {output_csv_path}")

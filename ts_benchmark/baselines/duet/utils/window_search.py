@@ -149,53 +149,32 @@ def find_interesting_windows(
             'max_ks_dist_idx': int(results[i]['max_ks_dist_idx']),
         }
 
-    # --- NEU: Hinzufügen von 6 festen, aber zufälligen, nicht-überlappenden Fenstern ---
-    print(" -> Searching for 6 additional random, non-overlapping windows for general analysis...")
-    NUM_RANDOM_WINDOWS = 6
-    RANDOM_SEED = 1337  # Fester Seed für Reproduzierbarkeit über verschiedene Studienläufe hinweg
+    # --- NEU: Hinzufügen von 10 zufälligen Fenstern (Überlappung erlaubt) ---
+    print(" -> Searching for 10 additional random windows for general analysis (allowing overlaps)...")
+    NUM_RANDOM_WINDOWS = 10
+    RANDOM_SEED = 1337  # Fester Seed für Reproduzierbarkeit
     np.random.seed(RANDOM_SEED)
 
-    # 1. Sammle alle bereits belegten Zeiträume aus den "harten" Fenstern.
-    # Ein Fenster belegt den Raum von [Input-Start] bis [Output-Ende].
-    occupied_indices = set()
-    all_hard_indices = set()
-    for channel_results in final_results.values():
-        for idx in channel_results.values():
-            all_hard_indices.add(idx)
+    # 1. Erstelle einen Pool aller möglichen Start-Indizes.
+    # Die Nicht-Überlappungs-Logik wird entfernt, um sicherzustellen, dass wir immer Fenster finden.
+    possible_start_indices = [i + search_offset for i in range(num_windows)]
 
-    for window_start_idx in all_hard_indices:
-        # Der Input für die Vorhersage beginnt bei `window_start_idx + horizon - seq_len`.
-        # Das "Nachher"-Fenster endet bei `window_start_idx + 2 * horizon`.
-        sample_start_idx = window_start_idx + horizon - seq_len
-        sample_end_idx = window_start_idx + 2 * horizon
-        occupied_indices.update(range(sample_start_idx, sample_end_idx))
-
-    # 2. Erstelle einen Pool an gültigen, freien Start-Indizes.
-    possible_start_indices = []
-    # Die Schleife durchläuft alle möglichen Startpunkte im durchsuchbaren Bereich.
-    for i in range(num_windows):
-        potential_start_idx = i + search_offset
-        
-        # Definiere den Raum, den dieses potenzielle Fenster belegen würde.
-        potential_sample_start = potential_start_idx + horizon - seq_len
-        potential_sample_end = potential_start_idx + 2 * horizon
-        potential_range = set(range(potential_sample_start, potential_sample_end))
-
-        # Prüfe, ob es eine Überschneidung mit bereits belegten Bereichen gibt.
-        if potential_range.isdisjoint(occupied_indices):
-            possible_start_indices.append(potential_start_idx)
-
-    # 3. Wähle 6 zufällige Fenster aus dem Pool (ohne Zurücklegen).
-    if len(possible_start_indices) < NUM_RANDOM_WINDOWS:
-        print(f"    WARNUNG: Weniger als {NUM_RANDOM_WINDOWS} nicht-überlappende zufällige Fenster gefunden. "
+    # 2. Wähle 10 zufällige Fenster aus dem Pool.
+    # Wir verwenden replace=False, um sicherzustellen, dass wir 10 *einzigartige* zufällige Fenster bekommen, falls möglich.
+    if len(possible_start_indices) >= NUM_RANDOM_WINDOWS:
+        num_to_sample = NUM_RANDOM_WINDOWS
+        replace = False
+    else:
+        # Sollte selten passieren, aber sicher ist sicher.
+        print(f"    WARNUNG: Weniger als {NUM_RANDOM_WINDOWS} mögliche Fenster im Datensatz gefunden. "
               f"Verwende {len(possible_start_indices)} stattdessen.")
         num_to_sample = len(possible_start_indices)
-    else:
-        num_to_sample = NUM_RANDOM_WINDOWS
+        replace = False # Immer noch False, da wir alle verfügbaren nehmen
 
     if num_to_sample > 0:
-        random_indices = np.random.choice(possible_start_indices, size=num_to_sample, replace=False)
-        # 4. Füge die zufälligen Fenster zu den Ergebnissen hinzu.
+        random_indices = np.random.choice(possible_start_indices, size=num_to_sample, replace=replace)
+        
+        # 3. Füge die zufälligen Fenster zu den Ergebnissen hinzu.
         for i, random_idx in enumerate(random_indices):
             method_name = f'random_window_{i+1}_idx'
             for channel_name in final_results:

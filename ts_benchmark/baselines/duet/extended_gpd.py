@@ -8,7 +8,7 @@ from torch.distributions.utils import broadcast_all
 
 class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
     arg_constraints = {
-        'pi': constraints.interval(0.0, 1.0), # Zero-inflation proportion
+        'pi_raw': constraints.real,          # Raw logit for pi (sigmoid applied)
         'kappa_raw': constraints.real,       # Raw parameter for kappa (softplus applied)
         'sigma_raw': constraints.real,       # Raw parameter for sigma (softplus applied)
         'xi': constraints.real               # Shape parameter xi
@@ -17,13 +17,16 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
 
     has_rsample = False # For now, no reparameterization trick
 
-    def __init__(self, pi, kappa_raw, sigma_raw, xi, validate_args=None):
+    def __init__(self, pi_raw, kappa_raw, sigma_raw, xi, validate_args=None):
         # Broadcast all parameters to ensure consistent shape
-        self.pi, self.kappa_raw, self.sigma_raw, self.xi = broadcast_all(pi, kappa_raw, sigma_raw, xi)
+        self.pi_raw, self.kappa_raw, self.sigma_raw, self.xi = broadcast_all(pi_raw, kappa_raw, sigma_raw, xi)
         
-        # Apply softplus to ensure kappa and sigma are positive
-        self.kappa = F.softplus(self.kappa_raw) + 1e-4 # Add epsilon for stability
-        self.sigma = F.softplus(self.sigma_raw) + 1e-4 # Add epsilon for stability
+        # Apply transformations to get valid distribution parameters
+        self.pi = torch.clamp(torch.sigmoid(self.pi_raw), min=1e-6, max=1-1e-6)
+        self.kappa = F.softplus(self.kappa_raw) + 1e-6 # Add epsilon for stability
+        self.sigma = F.softplus(self.sigma_raw) + 1e-6 # Add epsilon for stability
+
+        
 
         super().__init__(self.pi.shape, validate_args=validate_args)
     
@@ -65,42 +68,31 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
         return torch.where(torch.abs(xi) < 1e-9, exp_pdf_case, gpd_pdf_case)
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
-        # Parameters (self.pi etc.) have shape e.g. [B, N_vars, H]
-        # value has shape [B, H, N_vars]. We need to align them for broadcasting.
-        try:
-            # Permute params from [B, N_vars, H] to [B, H, N_vars]
-            pi, kappa, sigma, xi = [p.permute(0, 2, 1) for p in (self.pi, self.kappa, self.sigma, self.xi)]
-        except (IndexError, RuntimeError): # Fallback if params are not 3D
-            pi, kappa, sigma, xi = self.pi, self.kappa, self.sigma, self.xi
+        # value has shape [B, N_vars, H]
+        # Parameters have shape [B, N_vars, H]
+        kappa, sigma, xi = self.kappa, self.sigma, self.xi
+        pi_raw = self.pi_raw
 
-        value_safe = torch.clamp(value, min=0.0)
+        
 
-        # Log prob for zero values is simply log(pi)
-        log_prob_at_zero = torch.log(torch.clamp(pi, min=1e-9)) # Clamp pi to prevent log(0)
+        log_probs = torch.zeros_like(value, dtype=value.dtype, device=value.device)
 
-        # Log prob for non-zero values is log((1-pi) * pdf)
-        gpd_cdf_val = self._gpd_cdf(value_safe, sigma, xi)
-        gpd_pdf_val = self._gpd_pdf(value_safe, sigma, xi)
+        # Case 1: value == 0 (zero-inflated part)
+        # log_prob(0) = log(pi)
+        zero_mask = (value == 0)
+        log_probs[zero_mask] = torch.log(self.pi[zero_mask])
 
-        # Ensure gpd_cdf_val and gpd_pdf_val are positive before use
-        gpd_cdf_val = torch.clamp(gpd_cdf_val, min=1e-6) # Increased clamp for stability
-        gpd_pdf_val = torch.clamp(gpd_pdf_val, min=1e-6) # Increased clamp for stability
+        # Case 2: value > 0 (GPD part)
+        # log_prob(x) = log(1 - pi) + log(pdf(x))
+        positive_mask = (value > 0)
+        if torch.any(positive_mask):
+            # Calculate PDF for positive values
+            pdf_gpd = self._gpd_pdf(value[positive_mask], sigma[positive_mask], xi[positive_mask])
+            # Clamp pdf_gpd to avoid log(0)
+            pdf_gpd = torch.clamp(pdf_gpd, min=1e-9)
+            log_probs[positive_mask] = torch.log(1 - self.pi[positive_mask]) + torch.log(pdf_gpd)
 
-        # pdf is d/dz W(F(z)) = kappa * F(z)^(kappa-1) * dF/dz
-        # Clamp gpd_cdf_val.pow(kappa - 1) to prevent inf/nan if kappa - 1 is very negative and gpd_cdf_val is very small
-        pow_term = torch.clamp(gpd_cdf_val, min=1e-6).pow(kappa - 1)
-        continuous_density = kappa * pow_term * gpd_pdf_val
-        continuous_density = torch.clamp(continuous_density, min=1e-9) # Clamp again before log
-
-        # Add epsilon to (1 - pi) to prevent log(0) if pi is 1
-        one_minus_pi = torch.clamp(1 - pi, min=1e-9)
-        log_prob_continuous = torch.log(one_minus_pi * continuous_density)
-
-        # Combine based on whether value is zero
-        is_zero = (value == 0)
-        log_probs = torch.where(is_zero, log_prob_at_zero, log_prob_continuous)
-
-        # Handle values outside support
+        # Handle values outside support (value < 0)
         log_probs[value < 0] = -float('inf')
 
         return log_probs

@@ -58,6 +58,11 @@ class ExtendedGPDOutput:
         # The ZeroInflatedExtendedGPD_M1_Continuous distribution expects raw
         # (unconstrained) parameters for kappa and sigma and applies softplus
         # internally. xi is unconstrained.
+        # print(f"DEBUG: ExtendedGPDOutput - pi | Shape: {pi.shape} | Mean: {pi.mean():.4f} | Std: {pi.std():.4f} | Min: {pi.min():.4f} | Max: {pi.max():.4f}")
+        # print(f"DEBUG: ExtendedGPDOutput - kappa_raw | Shape: {kappa_raw.shape} | Mean: {kappa_raw.mean():.4f} | Std: {kappa_raw.std():.4f} | Min: {kappa_raw.min():.4f} | Max: {kappa_raw.max():.4f}")
+        # print(f"DEBUG: ExtendedGPDOutput - sigma_raw | Shape: {sigma_raw.shape} | Mean: {sigma_raw.mean():.4f} | Std: {sigma_raw.std():.4f} | Min: {sigma_raw.min():.4f} | Max: {sigma_raw.max():.4f}")
+        # print(f"DEBUG: ExtendedGPDOutput - xi | Shape: {xi.shape} | Mean: {xi.mean():.4f} | Std: {xi.std():.4f} | Min: {xi.min():.4f} | Max: {xi.max():.4f}")
+
         return ZeroInflatedExtendedGPD_M1_Continuous(
-            pi=pi, kappa_raw=kappa_raw, sigma_raw=sigma_raw, xi=xi
+            pi_raw=pi_raw, kappa_raw=kappa_raw, sigma_raw=sigma_raw, xi=xi
         )

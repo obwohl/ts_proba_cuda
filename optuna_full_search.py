@@ -27,11 +27,10 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 # werden in der `setup_logging`-Funktion pro Prozess eingerichtet.
 logging.getLogger("optuna").setLevel(logging.INFO)
 
-# --- 2. Feste Trainingsparameter für die lange, intensive Suche ---
 FIXED_PARAMS = {
-    "data_file": "preci_short.csv", 
+    "data_file": "preci_large.csv", 
     "horizon": 24,
-    "train_ratio_in_tv": 0.9, # NEU: Split-Verhältnis explizit gemacht
+    "train_ratio_in_tv": 0.8, # NEU: Split-Verhältnis explizit gemacht
     # --- NEU: Wähle die zu optimierende Metrik ---
     # 'cvar': Conditional Value at Risk (Durchschnitt der schlechtesten 5% Fehler) -> robustere Modelle
     # 'avg_crps': Durchschnittlicher CRPS-Fehler über alle Fenster -> beste Durchschnitts-Performance
@@ -39,14 +38,14 @@ FIXED_PARAMS = {
     # Setze hier einen Kanalnamen (z.B. "wassertemp"), um den Validierungs-Loss nur für diesen Kanal zu berechnen.
     # Setze auf `None`, um den Durchschnitt über alle Kanäle zu verwenden (Standardverhalten).
     "optimization_target_channel": None,
-    "num_epochs": 30,
-    "patience": 3,
+    "num_epochs":10,
+    "patience": 1,
     "early_stopping_delta": 1e-4,
     
 
     "distribution_family": "ZIEGPD_M1",
     
-    "num_workers": int(os.getenv("TRIAL_WORKERS", "4")),
+    "num_workers": 0, # HARDCODED TO 0 TO PREVENT "TOO MANY OPEN FILES" ERROR
     "quantiles": [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99], # <-- HIER ERWEITERN
     "lradj": "constant", # Um Cosine Annealing zu verwenden
     "warmup_epochs": 0,
@@ -58,6 +57,8 @@ FIXED_PARAMS = {
     "profile_epoch": 0,
     # NEU: Schalter zum Deaktivieren der speicherintensiven Plots während der Optuna-Suche.
     "enable_diagnostic_plots": True,
+    "loss_coef": 0.5,
+    
     # "channel_adjacency_prior": [ isarpegel
     #     [1, 1, 0, 0, 0, 0],  
     #     [1, 1, 0, 0, 0, 0],
@@ -76,48 +77,41 @@ FIXED_PARAMS = {
 def get_suggested_params(trial: optuna.Trial) -> dict:
     """Schlägt einen Satz von Hyperparametern vor."""
     params = {}
-    params["seq_len"] = trial.suggest_categorical("seq_len", [48, 96, 192, 384, 480])
-    params["norm_mode"] = trial.suggest_categorical("norm_mode", ["subtract_last", "subtract_median"])
-    params["lr"] = trial.suggest_float("lr", 1e-6, 1e-2, log=True)
-    params["d_model"] = trial.suggest_categorical("d_model", [32, 64, 128, 256])
-    params["d_ff"] = trial.suggest_categorical("d_ff", [32, 64, 128, 256])
+    params["seq_len"] = trial.suggest_categorical("seq_len", [96,192, 384, 480])
+    params["norm_mode"] = trial.suggest_categorical("norm_mode", ["subtract_median"]) # "subtract_last" deaktiviert
+    params["lr"] = trial.suggest_float("lr", 5e-5, 1e-4, log=True)
+    params["d_model"] = trial.suggest_categorical("d_model", [128, 256, 512])
+    params["d_ff"] = trial.suggest_categorical("d_ff", [128, 256, 512])
     params["e_layers"] = trial.suggest_int("e_layers", 1, 3)
 
     # --- NEU: moving_avg als kategorialer Hyperparameter ---
-    # Gib hier sinnvolle Werte basierend auf der bekannten Periodizität deiner Daten an.
-    params["moving_avg"] = trial.suggest_categorical("moving_avg", [25, 49, 97, 193]) # für wasserpegel schwierig zu raten, stündlich, halbtäglich, täglich, oder zweitäglich?
+    # zu bestimmen analytisch-heuristisch per analyze_mutual_information.py
+
+    params["moving_avg"] = trial.suggest_categorical("moving_avg", [24, 96]) 
 
     # --- KORREKTUR: Statischer Suchraum für n_heads ---
     # 1. Schlage n_heads immer aus der vollen Liste vor, um den Suchraum statisch zu halten.
-    params["n_heads"] = trial.suggest_categorical("n_heads", [1, 2, 4, 8])
+    params["n_heads"] = trial.suggest_categorical("n_heads", [2, 4, 8])
 
     # 2. Prüfe die Gültigkeit der Kombination und prune den Trial, wenn sie ungültig ist.
     if params["d_model"] % params["n_heads"] != 0:
         raise optuna.exceptions.TrialPruned(f"d_model ({params['d_model']}) is not divisible by n_heads ({params['n_heads']}).")
         
-    params["dropout"] = trial.suggest_float("dropout", 0.0, 0.5)
-    params["fc_dropout"] = trial.suggest_float("fc_dropout", 0.0, 0.5)
+    params["dropout"] = trial.suggest_float("dropout", 0.0, 0.1)
+    params["fc_dropout"] = trial.suggest_float("fc_dropout", 0.0, 0.1)
     
     # Optuna schlägt die exakte Batch-Größe vor, die verwendet werden soll.
-    params["batch_size"] = trial.suggest_categorical("batch_size", [256, 512, 1024])
+    params["batch_size"] = trial.suggest_categorical("batch_size", [256])
 
-    # --- ENTFERNT: Veraltete SBP-spezifische Loss-Parameter ---
-    # Die Student's T-Verteilung wird mit standardmäßiger Negative Log-Likelihood (NLL) trainiert.
-    # Daher werden loss_function, gfl_gamma und nll_loss_coef nicht mehr benötigt.
-    # params["loss_coef"] = trial.suggest_float("loss_coef", 0.1, 2.0, log=True)
-    # params["loss_function"] = "gfl" 
-    # if params["loss_function"] == 'gfl':
-    #     params["gfl_gamma"] = trial.suggest_float("gfl_gamma", 0.5, 5.0)
-    # params["nll_loss_coef"] = trial.suggest_float("nll_loss_coef", 1e-4, 0.5, log=True)
-    
+
     params["use_agc"] = trial.suggest_categorical("use_agc", [True, False])
     if params["use_agc"]:
         params["agc_lambda"] = trial.suggest_float("agc_lambda", 0.001, 0.1, log=True)
 
     # --- NEU: Hybride Experten-Konfiguration ---
-    params["num_linear_experts"] = trial.suggest_int("num_linear_experts", 1, 8)
-    params["num_univariate_esn_experts"] = trial.suggest_int("num_univariate_esn_experts", 1, 8)
-    params["num_multivariate_esn_experts"] = trial.suggest_int("num_multivariate_esn_experts", 1, 4)
+    params["num_linear_experts"] = trial.suggest_int("num_linear_experts", 2,4)
+    params["num_univariate_esn_experts"] = trial.suggest_int("num_univariate_esn_experts", 2,4)
+    params["num_multivariate_esn_experts"] = trial.suggest_int("num_multivariate_esn_experts", 1,2)
     
     # Stelle sicher, dass mindestens ein Experte vorhanden ist.
     total_experts = (
@@ -128,13 +122,14 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     if total_experts == 0: 
         raise optuna.exceptions.TrialPruned("Total number of experts is zero.")
     
-    params["k"] = trial.suggest_int("k", 1, total_experts)
+    # Set k to the rounded square root of total_experts for simplicity
+    params["k"] = int(torch.round(torch.sqrt(torch.tensor(total_experts))).item())
 
-    params["hidden_size"] = trial.suggest_categorical("hidden_size", [32, 64, 128, 256, 512])
+    params["hidden_size"] = trial.suggest_categorical("hidden_size", [256, 512])
 
     # Schlage univariaten ESN-Parameter vor, wenn diese Experten verwendet werden.
     if params["num_univariate_esn_experts"] > 0:
-        params["reservoir_size_uni"] = trial.suggest_categorical("reservoir_size_uni", [32, 64, 128, 256])
+        params["reservoir_size_uni"] = trial.suggest_categorical("reservoir_size_uni", [128, 256])
         params["spectral_radius_uni"] = trial.suggest_float("spectral_radius_uni", 0.6, 1.4)
         params["sparsity_uni"] = trial.suggest_float("sparsity_uni", 0.01, 0.5)
         params["leak_rate_uni"] = trial.suggest_float("leak_rate_uni", 0.1, 1.0)
@@ -143,13 +138,13 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
 
     # Schlage multivariaten ESN-Parameter vor, wenn diese Experten verwendet werden.
     if params["num_multivariate_esn_experts"] > 0:
-        params["reservoir_size_multi"] = trial.suggest_categorical("reservoir_size_multi", [32, 64, 128, 256])
+        params["reservoir_size_multi"] = trial.suggest_categorical("reservoir_size_multi", [128, 256])
         params["spectral_radius_multi"] = trial.suggest_float("spectral_radius_multi", 0.6, 1.4)
         params["sparsity_multi"] = trial.suggest_float("sparsity_multi", 0.01, 0.5)
         params["leak_rate_multi"] = trial.suggest_float("leak_rate_multi", 0.1, 1.0)
         params["input_scaling_multi"] = trial.suggest_float("input_scaling_multi", 0.01, 1.0, log=True)
         # NEU: Weight Decay (L2-Regularisierung) für die multivariaten ESN-Readout-Schichten
-        params["esn_multi_weight_decay"] = trial.suggest_float("esn_multi_weight_decay", 1e-6, 1e-1, log=True)
+        params["esn_multi_weight_decay"] = trial.suggest_float("esn_multi_weight_decay", 1e-6, 1e-3, log=True)
 
     # --- ÜBERPRÜFT: Parameter des Projection Head ---
     # Der Suchraum für die Architektur des Projection Head ist generisch und
@@ -157,9 +152,9 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params["projection_head_layers"] = trial.suggest_int("projection_head_layers", 2, 4)
     if params["projection_head_layers"] > 0:
         params["projection_head_dim_factor"] = trial.suggest_categorical("projection_head_dim_factor", [1, 2, 4, 8])
-        params["projection_head_dropout"] = trial.suggest_float("projection_head_dropout", 0.0, 0.5)
+        params["projection_head_dropout"] = trial.suggest_float("projection_head_dropout", 0.0, 0.1)
 
-    params["loss_target_clip"] = trial.suggest_categorical("loss_target_clip", [None, 5.0, 10.0, 15.0])
+    params["loss_target_clip"] = trial.suggest_categorical("loss_target_clip", [None])
 
     # --- NEU: Channel Adjacency Prior an/ausschalten ---
     params["use_channel_adjacency_prior"] = trial.suggest_categorical("use_channel_adjacency_prior", [False])
@@ -198,7 +193,8 @@ def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
 
         # 4. Berechne die finalen Metriken auf dem besten Modell
         # Lade das beste Modell und führe eine finale Validierung durch
-        model.model.load_state_dict(torch.load(model.early_stopping.path, weights_only=False))
+        checkpoint = torch.load(model.early_stopping.path, weights_only=False)
+        model.model.load_state_dict(checkpoint['model_state_dict'])
         _, valid_data = train_val_split(data, model_hyper_params["train_ratio_in_tv"], model_hyper_params["seq_len"])
         _, valid_loader = forecasting_data_provider(valid_data, model.config, timeenc=1, batch_size=model.config.batch_size, shuffle=False, drop_last=False)
         device = next(model.model.parameters()).device

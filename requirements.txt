@@ -19,6 +19,7 @@ optuna
 # --- Performance & Utilities ---
 tqdm # Fortschrittsbalken
 Pillow # Für Bildverarbeitung (PIL)
+numba # For numerical optimizations
 
 # --- Visualisierung & Logging ---
 matplotlib
@@ -29,4 +30,3 @@ tensorboard # Für das Logging mit SummaryWriter
 scikit-posthocs # For statistical tests in analyze_hardest_windows.py
 tqdm # Progress bars
 astropy # For Lomb-Scargle periodogram in find_lombscargle_periods.py
-

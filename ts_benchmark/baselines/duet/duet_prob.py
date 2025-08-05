@@ -641,16 +641,20 @@ class DUETProb(ModelBase):
                     avg_selection_counts = sum_selection_counts / expert_metrics_batch_count if sum_selection_counts is not None else None
                 
                 if avg_gate_weights_linear is not None:
+                    tqdm.write(f"  -> Avg Linear Expert Gating Weights (Epoch {epoch+1}): {avg_gate_weights_linear.tolist()}")
                     for i, weight in enumerate(avg_gate_weights_linear):
                         writer.add_scalar(f"Expert Gating Weights/Linear_Expert_{i}", weight.item(), epoch)
                 if avg_gate_weights_uni_esn is not None:
+                    tqdm.write(f"  -> Avg Uni ESN Expert Gating Weights (Epoch {epoch+1}): {avg_gate_weights_uni_esn.tolist()}")
                     for i, weight in enumerate(avg_gate_weights_uni_esn):
                         writer.add_scalar(f"Expert Gating Weights/Uni_ESN_Expert_{i}", weight.item(), epoch)
                 if avg_gate_weights_multi_esn is not None:
+                    tqdm.write(f"  -> Avg Multi ESN Expert Gating Weights (Epoch {epoch+1}): {avg_gate_weights_multi_esn.tolist()}")
                     for i, weight in enumerate(avg_gate_weights_multi_esn):
                         writer.add_scalar(f"Expert Gating Weights/Multi_ESN_Expert_{i}", weight.item(), epoch)
 
                 if avg_selection_counts is not None and avg_selection_counts.numel() > 0:
+                    tqdm.write(f"  -> Avg Expert Selection Counts (Epoch {epoch+1}): {avg_selection_counts.tolist()}")
                     expert_idx = 0
                     for i in range(config.num_linear_experts):
                         writer.add_scalar(f"Expert Gating Counts/Linear_{i}", avg_selection_counts[expert_idx].item(), epoch)
@@ -665,6 +669,8 @@ class DUETProb(ModelBase):
                 if num_batches_processed > 0:
                     avg_p_learned = sum_p_learned / num_batches_processed
                     avg_p_final = sum_p_final / num_batches_processed
+                    tqdm.write(f"  -> Avg P Learned (Epoch {epoch+1}): {avg_p_learned.tolist()}")
+                    tqdm.write(f"  -> Avg P Final (Epoch {epoch+1}): {avg_p_final.tolist()}")
 
                 metric_for_optimization = float('nan')
 

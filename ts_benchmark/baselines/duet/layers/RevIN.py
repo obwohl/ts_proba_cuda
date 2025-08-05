@@ -82,11 +82,33 @@ class RevIN(nn.Module):
 
         elif self.norm_mode == 'subtract_median':
             # Location is the median value of the sequence.
-            self.location_stat = torch.median(x, dim=1, keepdim=True)[0] # CORRECTED: .detach() removed
-            # Scale is the RMS of the sequence after subtracting the location.
-            x_centered = x - self.location_stat
-            
-            self.scale_stat = torch.sqrt(torch.mean(x_centered**2, dim=1, keepdim=True) + self.eps) # CORRECTED: .detach() removed
+            self.location_stat = torch.median(x, dim=1, keepdim=True)[0]
+
+            # Calculate scale_stat based on non-zero values for robustness (using MAD)
+            # Reshape x to [Batch, NumFeatures, SeqLen] for easier per-channel processing
+            x_reshaped = x.permute(0, 2, 1) # [B, N, L]
+
+            batch_size, num_features, seq_len = x_reshaped.shape
+            scale_stats_per_channel = torch.ones(batch_size, num_features, 1, device=x.device, dtype=x.dtype) * self.eps # Initialize with eps
+
+            for b in range(batch_size):
+                for n in range(num_features):
+                    channel_data = x_reshaped[b, n, :].contiguous()
+                    # Consider values greater than a small epsilon as non-zero
+                    non_zero_mask = channel_data > self.eps
+                    non_zero_values = channel_data[non_zero_mask]
+
+                    if non_zero_values.numel() > 0: # Check if there are any significant non-zero values
+                        # Calculate MAD for non-zero values
+                        median_non_zero = torch.median(non_zero_values)
+                        # MAD = median(|x - median(x)|)
+                        mad = torch.median(torch.abs(non_zero_values - median_non_zero))
+                        scale_stats_per_channel[b, n, 0] = mad + self.eps # Add eps for stability
+                    else:
+                        # Fallback for channels with all zeros or very few non-zero values
+                        scale_stats_per_channel[b, n, 0] = 1.0 + self.eps # Use a default scale of 1.0
+
+            self.scale_stat = scale_stats_per_channel.permute(0, 2, 1) # Reshape back to [Batch, 1, NumFeatures]
 
     
             
