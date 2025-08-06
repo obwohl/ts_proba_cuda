@@ -28,7 +28,7 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 logging.getLogger("optuna").setLevel(logging.INFO)
 
 FIXED_PARAMS = {
-    "data_file": "preci_large.csv", 
+    "data_file": "preci_short.csv", 
     "horizon": 24,
     "train_ratio_in_tv": 0.8, # NEU: Split-Verhältnis explizit gemacht
     # --- NEU: Wähle die zu optimierende Metrik ---

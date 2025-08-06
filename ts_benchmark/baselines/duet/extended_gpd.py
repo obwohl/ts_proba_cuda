@@ -28,13 +28,13 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
 
         if stats is not None:
             # stats has the shape: [B, N_vars, 2]
-            # self.mean, self.std get the shape: [B, N_vars, 1] for broadcasting
-            self.mean = stats[:, :, 0].unsqueeze(-1)
+            # self._mean, self._std get the shape: [B, N_vars, 1] for broadcasting
+            self._mean = stats[:, :, 0].unsqueeze(-1)
             STD_FLOOR = 1e-6  # Safety floor for the standard deviation
-            self.std = torch.clamp(stats[:, :, 1], min=STD_FLOOR).unsqueeze(-1)
+            self._std = torch.clamp(stats[:, :, 1], min=STD_FLOOR).unsqueeze(-1)
         else:
-            self.mean = None
-            self.std = None
+            self._mean = None
+            self._std = None
 
         super().__init__(self.pi.shape, validate_args=validate_args)
     
@@ -76,6 +76,10 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
         return torch.where(torch.abs(xi) < 1e-9, exp_pdf_case, gpd_pdf_case)
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
+        # value comes in as [B, H, N_vars], but params are [B, N_vars, H]. Let's align them.
+        if value.dim() == 3 and self.pi.dim() == 3 and value.shape[1] == self.pi.shape[2] and value.shape[2] == self.pi.shape[1]:
+            value = value.permute(0, 2, 1)
+
         # value has shape [B, N_vars, H]
         # Parameters have shape [B, N_vars, H]
         kappa, sigma, xi = self.kappa, self.sigma, self.xi
@@ -95,9 +99,9 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
 
             # --- Internal Normalization for the GPD component ---
             # Reshape mean and std to match the shape of v_pos
-            # self.mean/std have shape [B, N_vars, 1]. We need to align them with `positive_mask`.
-            mean_expanded = self.mean.expand_as(value)[positive_mask]
-            std_expanded = self.std.expand_as(value)[positive_mask]
+            # self._mean/std have shape [B, N_vars, 1]. We need to align them with `positive_mask`.
+            mean_expanded = self._mean.expand_as(value)[positive_mask]
+            std_expanded = self._std.expand_as(value)[positive_mask]
             v_pos_norm = (v_pos - mean_expanded) / std_expanded
             # --- End Internal Normalization ---
 
@@ -177,8 +181,8 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
         # If q <= pi, the quantile is 0 due to the zero-inflation mass
         # For the positive part, we need to denormalize the result
         # Reshape mean and std for broadcasting with quantiles_norm [B, N_vars, H, Q]
-        mean_for_bcast = self.mean.unsqueeze(-1)
-        std_for_bcast = self.std.unsqueeze(-1)
+        mean_for_bcast = self._mean.unsqueeze(-1)
+        std_for_bcast = self._std.unsqueeze(-1)
         quantiles_denorm = quantiles_norm * std_for_bcast + mean_for_bcast
 
         quantiles = torch.where(
