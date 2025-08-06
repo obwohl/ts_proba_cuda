@@ -228,10 +228,15 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
         distr_params = torch.stack(distr_params_list, dim=1)
         distr_params = torch.nan_to_num(distr_params, nan=0.0, posinf=1e4, neginf=-1e4)
 
-        base_distr = self.distr_output.distribution(distr_params, self.horizon)
-
-        # Always wrap the distribution for denormalization
-        final_distr = DenormalizingDistribution(base_distr, stats)
+        if self.config.distribution_family == "ZIEGPD_M1":
+            # For ZIEGPD, the distribution handles normalization internally.
+            # We pass the stats directly to it.
+            base_distr = self.distr_output.distribution(distr_params, self.horizon, stats=stats)
+            final_distr = base_distr
+        else:
+            # For other families, we use the denormalizing wrapper.
+            base_distr = self.distr_output.distribution(distr_params, self.horizon)
+            final_distr = DenormalizingDistribution(base_distr, stats)
 
         return final_distr, base_distr, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, p_learned, p_final, clean_logits, noisy_logits, distr_params
 

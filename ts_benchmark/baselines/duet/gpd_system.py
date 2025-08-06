@@ -25,7 +25,7 @@ class ExtendedGPDOutput:
         self.n_vars = len(channel_types)
 
     def distribution(
-        self, distr_args: torch.Tensor, horizon: int
+        self, distr_args: torch.Tensor, horizon: int, stats: torch.Tensor = None
     ) -> ZeroInflatedExtendedGPD_M1_Continuous:
         """
         Creates a ZeroInflatedExtendedGPD_M1_Continuous distribution from the
@@ -35,6 +35,8 @@ class ExtendedGPDOutput:
             distr_args (torch.Tensor): The raw tensor from the projection head,
                                        with shape [B, N_vars, Horizon * args_dim].
             horizon (int): The forecast horizon.
+            stats (torch.Tensor, optional): Normalization statistics (mean, std).
+                                              Defaults to None.
 
         Returns:
             ZeroInflatedExtendedGPD_M1_Continuous: An instance of the distribution.
@@ -64,5 +66,5 @@ class ExtendedGPDOutput:
         # print(f"DEBUG: ExtendedGPDOutput - xi | Shape: {xi.shape} | Mean: {xi.mean():.4f} | Std: {xi.std():.4f} | Min: {xi.min():.4f} | Max: {xi.max():.4f}")
 
         return ZeroInflatedExtendedGPD_M1_Continuous(
-            pi_raw=pi_raw, kappa_raw=kappa_raw, sigma_raw=sigma_raw, xi=xi
+            pi_raw=pi_raw, kappa_raw=kappa_raw, sigma_raw=sigma_raw, xi=xi, stats=stats
         )
