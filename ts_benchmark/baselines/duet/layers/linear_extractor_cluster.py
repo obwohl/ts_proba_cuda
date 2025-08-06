@@ -90,6 +90,7 @@ class SparseDispatcher(object):
 class Linear_extractor_cluster(nn.Module):
     def __init__(self, config):
         super(Linear_extractor_cluster, self).__init__()
+        self.config = config # Store the config object
         self.noisy_gating = getattr(config, 'noisy_gating', True)
 
         # --- NEU: Korrekte Berechnung der Gesamtanzahl der Experten ---
@@ -185,7 +186,7 @@ class Linear_extractor_cluster(nn.Module):
         prob = torch.where(is_in, prob_if_in, prob_if_out)
         return prob
 
-    def noisy_top_k_gating(self, x, train, noise_epsilon=1e-2, gating_input=None):
+    def noisy_top_k_gating(self, x, train, gating_input=None):
         # Use gating_input if provided, otherwise use x
         if gating_input is None:
             
@@ -227,18 +228,21 @@ class Linear_extractor_cluster(nn.Module):
            
 
             raw_noise_logits = self.noise(input_for_gating_flat)
+            print(f"DEBUG: raw_noise_logits stats: mean={raw_noise_logits.mean().item():.6f}, std={raw_noise_logits.std().item():.6f}, min={raw_noise_logits.min().item():.6f}, max={raw_noise_logits.max().item():.6f}")
 
-       
 
             raw_noise_logits = torch.nan_to_num(raw_noise_logits)
 
-        
 
-            noise_stddev_flat = self.softplus(raw_noise_logits) + noise_epsilon
+            noise_stddev_flat = torch.clamp(self.softplus(raw_noise_logits), min=1e-6) + self.config.noise_epsilon
+            print(f"DEBUG: noise_stddev_flat stats: mean={noise_stddev_flat.mean().item():.6f}, std={noise_stddev_flat.std().item():.6f}, min={noise_stddev_flat.min().item():.6f}, max={noise_stddev_flat.max().item():.6f}")
 
-           
 
-            noisy_logits_flat = clean_logits_flat + (torch.randn_like(clean_logits_flat) * noise_stddev_flat)
+            random_noise = torch.randn_like(clean_logits_flat)
+            print(f"DEBUG: random_noise stats: mean={random_noise.mean().item():.6f}, std={random_noise.std().item():.6f}, min={random_noise.min().item():.6f}, max={random_noise.max().item():.6f}")
+
+            noisy_logits_flat = clean_logits_flat + (random_noise * noise_stddev_flat)
+            print(f"DEBUG: noisy_logits_flat stats: mean={noisy_logits_flat.mean().item():.6f}, std={noisy_logits_flat.std().item():.6f}, min={noisy_logits_flat.min().item():.6f}, max={noisy_logits_flat.max().item():.6f}")
         else:
             noisy_logits_flat = clean_logits_flat
 

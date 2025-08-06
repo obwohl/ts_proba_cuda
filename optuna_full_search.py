@@ -38,8 +38,8 @@ FIXED_PARAMS = {
     # Setze hier einen Kanalnamen (z.B. "wassertemp"), um den Validierungs-Loss nur für diesen Kanal zu berechnen.
     # Setze auf `None`, um den Durchschnitt über alle Kanäle zu verwenden (Standardverhalten).
     "optimization_target_channel": None,
-    "num_epochs":10,
-    "patience": 1,
+    "num_epochs":20,
+    "patience": 2,
     "early_stopping_delta": 1e-4,
     "debug_gating": True, # NEU: Schalter für detailliertes Gating-Logging
     
@@ -58,7 +58,7 @@ FIXED_PARAMS = {
     "profile_epoch": 0,
     # NEU: Schalter zum Deaktivieren der speicherintensiven Plots während der Optuna-Suche.
     "enable_diagnostic_plots": True,
-    "loss_coef": 0.5,
+    "loss_coef": 2.0,
     
     # "channel_adjacency_prior": [ isarpegel
     #     [1, 1, 0, 0, 0, 0],  
@@ -147,15 +147,19 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
         # NEU: Weight Decay (L2-Regularisierung) für die multivariaten ESN-Readout-Schichten
         params["esn_multi_weight_decay"] = trial.suggest_float("esn_multi_weight_decay", 1e-6, 1e-3, log=True)
 
+    # --- NEU: Gating-Parameter ---
+    params["noise_epsilon"] = trial.suggest_float("noise_epsilon", 1e-3, 1e-1, log=True)
+    params["loss_coef"] = trial.suggest_float("loss_coef", 1.0, 5.0, log=True)
+
     # --- ÜBERPRÜFT: Parameter des Projection Head ---
     # Der Suchraum für die Architektur des Projection Head ist generisch und
     # funktioniert auch mit dem einfacheren Output der Student's T-Verteilung.
     params["projection_head_layers"] = trial.suggest_int("projection_head_layers", 2, 4)
     if params["projection_head_layers"] > 0:
-            params["projection_head_dim_factor"] = trial.suggest_categorical("projection_head_dim_factor", [1, 2, 4, 8])
-            params["projection_head_dropout"] = trial.suggest_float("projection_head_dropout", 0.0, 0.1)
+        params["projection_head_dim_factor"] = trial.suggest_categorical("projection_head_dim_factor", [1, 2, 4, 8])
+        params["projection_head_dropout"] = trial.suggest_float("projection_head_dropout", 0.0, 0.1)
 
-        params["debug_gating"] = trial.suggest_categorical("debug_gating", [True, False])
+    
 
     params["loss_target_clip"] = trial.suggest_categorical("loss_target_clip", [None])
 
@@ -179,6 +183,8 @@ def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
     save_dir = f"results/optuna_heuristic/{STUDY_NAME}/trial_{trial_num}"
     os.makedirs(save_dir, exist_ok=True)
     model_hyper_params['log_dir'] = save_dir
+    model_hyper_params['study_name'] = STUDY_NAME
+    model_hyper_params['trial_num'] = trial_num
 
     model = None # Ensure model is defined in the outer scope for the finally block
     try:

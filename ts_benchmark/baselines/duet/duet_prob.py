@@ -19,6 +19,7 @@ import contextlib
 from PIL import Image
 from tqdm import tqdm
 import hashlib
+import logging
 from ts_benchmark.baselines.duet.models.duet_prob_model import DUETProbModel, DenormalizingDistribution
 from ts_benchmark.baselines.duet.utils.tools import adjust_learning_rate, EarlyStopping
 from ts_benchmark.baselines.utils import forecasting_data_provider, train_val_split
@@ -203,11 +204,14 @@ class DUETProb(ModelBase):
 
     def _setup_gating_logger(self):
         """Initialisiert einen separaten Logger für die Gating-Analyse."""
-        if not getattr(self.config, 'debug_gating', False) or not hasattr(self.config, 'log_dir'):
+        if not getattr(self.config, 'debug_gating', False) or not hasattr(self.config, 'study_name') or not hasattr(self.config, 'trial_num'):
             return
 
-        log_path = os.path.join(self.config.log_dir, 'gating_analysis.log')
-        self.gating_logger = logging.getLogger(f"gating_analysis_{self.config.log_dir}")
+        log_dir_base = os.path.join('logs', self.config.study_name)
+        os.makedirs(log_dir_base, exist_ok=True)
+        log_path = os.path.join(log_dir_base, f'trial_{self.config.trial_num}_gating_analysis.log')
+        
+        self.gating_logger = logging.getLogger(f"gating_analysis_{self.config.study_name}_{self.config.trial_num}")
         self.gating_logger.setLevel(logging.DEBUG)
         
         # Verhindert, dass Logs an den Root-Logger weitergegeben werden
@@ -225,36 +229,44 @@ class DUETProb(ModelBase):
         if not self.gating_logger:
             return
 
-        self.model.eval() # In den Eval-Modus für eine saubere Analyse
-        with torch.no_grad():
+        # Temporär in den Trainingsmodus wechseln, um noisy_gating zu aktivieren
+        self.model.train() 
+        with torch.no_grad(): # Dennoch keine Gradienten berechnen
             input_data, target, _, _ = batch_data
             input_data = input_data.to(device)
             target = target.to(device)
 
-            denorm_distr, _, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, _, _, _, _, _, _ = self.model(input_data)
-            
+            denorm_distr, base_distr, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, expert_selection_counts, p_learned, p_final, clean_logits, noisy_logits, distr_params = self.model(input_data)
             target_horizon = target[:, -self.config.horizon:, :]
             nll_loss = -denorm_distr.log_prob(target_horizon).mean()
             total_loss = nll_loss + self.config.loss_coef * loss_importance
+        self.model.eval() # Zurück in den Eval-Modus
 
-            log_msg = f"Epoch: {epoch:<3} | Phase: {phase:<10} | Batch Loss: {total_loss.item():.4f}"
-            
-            if batch_gate_weights_linear.numel() > 0:
-                mean_w = batch_gate_weights_linear.mean().item()
-                std_w = batch_gate_weights_linear.std().item()
-                log_msg += f" | Linear Weights: μ={mean_w:.3f}, σ={std_w:.3f}"
+        log_msg = f"Epoch: {epoch:<3} | Phase: {phase:<10} | Batch Loss: {total_loss.item():.4f}"
+        
+        # Log clean and noisy logits stats
+        if clean_logits.numel() > 0:
+            log_msg += f" | Clean Logits: μ={clean_logits.mean().item():.3f}, σ={clean_logits.std().item():.3f}"
+        if noisy_logits is not None and noisy_logits.numel() > 0:
+            log_msg += f" | Noisy Logits: μ={noisy_logits.mean().item():.3f}, σ={noisy_logits.std().item():.3f}"
 
-            if batch_gate_weights_uni_esn.numel() > 0:
-                mean_w = batch_gate_weights_uni_esn.mean().item()
-                std_w = batch_gate_weights_uni_esn.std().item()
-                log_msg += f" | Univariate ESN Weights: μ={mean_w:.3f}, σ={std_w:.3f}"
+        # Log aggregated gating weights
+        if batch_gate_weights_linear.numel() > 0:
+            log_msg += f" | Linear Weights: μ={batch_gate_weights_linear.mean().item():.3f}, σ={batch_gate_weights_linear.std().item():.3f}"
+        if batch_gate_weights_uni_esn.numel() > 0:
+            log_msg += f" | Univariate ESN Weights: μ={batch_gate_weights_uni_esn.mean().item():.3f}, σ={batch_gate_weights_uni_esn.std().item():.3f}"
+        if batch_gate_weights_multi_esn.numel() > 0:
+            log_msg += f" | Multivariate ESN Weights: μ={batch_gate_weights_multi_esn.mean().item():.3f}, σ={batch_gate_weights_multi_esn.std().item():.3f}"
 
-            if batch_gate_weights_multi_esn.numel() > 0:
-                mean_w = batch_gate_weights_multi_esn.mean().item()
-                std_w = batch_gate_weights_multi_esn.std().item()
-                log_msg += f" | Multivariate ESN Weights: μ={mean_w:.3f}, σ={std_w:.3f}"
+        self.gating_logger.info(log_msg)
 
-            self.gating_logger.info(log_msg)
+        # Log individual expert gating weights for more granularity
+        if batch_gate_weights_linear.numel() > 0:
+            self.gating_logger.info(f"Epoch: {epoch:<3} | Phase: {phase:<10} | Individual Linear Weights: {batch_gate_weights_linear.tolist()}")
+        if batch_gate_weights_uni_esn.numel() > 0:
+            self.gating_logger.info(f"Epoch: {epoch:<3} | Phase: {phase:<10} | Individual Univariate ESN Weights: {batch_gate_weights_uni_esn.tolist()}")
+        if batch_gate_weights_multi_esn.numel() > 0:
+            self.gating_logger.info(f"Epoch: {epoch:<3} | Phase: {phase:<10} | Individual Multivariate ESN Weights: {batch_gate_weights_multi_esn.tolist()}")
 
         self.model.train() # Zurück in den Trainingsmodus
 
