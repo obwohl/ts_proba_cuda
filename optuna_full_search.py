@@ -41,6 +41,7 @@ FIXED_PARAMS = {
     "num_epochs":10,
     "patience": 1,
     "early_stopping_delta": 1e-4,
+    "debug_gating": True, # NEU: Schalter für detailliertes Gating-Logging
     
 
     "distribution_family": "ZIEGPD_M1",
@@ -151,8 +152,10 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     # funktioniert auch mit dem einfacheren Output der Student's T-Verteilung.
     params["projection_head_layers"] = trial.suggest_int("projection_head_layers", 2, 4)
     if params["projection_head_layers"] > 0:
-        params["projection_head_dim_factor"] = trial.suggest_categorical("projection_head_dim_factor", [1, 2, 4, 8])
-        params["projection_head_dropout"] = trial.suggest_float("projection_head_dropout", 0.0, 0.1)
+            params["projection_head_dim_factor"] = trial.suggest_categorical("projection_head_dim_factor", [1, 2, 4, 8])
+            params["projection_head_dropout"] = trial.suggest_float("projection_head_dropout", 0.0, 0.1)
+
+        params["debug_gating"] = trial.suggest_categorical("debug_gating", [True, False])
 
     params["loss_target_clip"] = trial.suggest_categorical("loss_target_clip", [None])
 

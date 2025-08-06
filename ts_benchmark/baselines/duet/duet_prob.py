@@ -182,6 +182,7 @@ class DUETProb(ModelBase):
         self.early_stopping: Optional[EarlyStopping] = None
         self.checkpoint_path: Optional[str] = None
         self.interesting_window_indices: Optional[Dict] = None
+        self.gating_logger: Optional[logging.Logger] = None
         
     @property
     def model_name(self) -> str:
@@ -199,6 +200,63 @@ class DUETProb(ModelBase):
         if not hasattr(self.config, 'enc_in'):
             raise AttributeError("Model configuration must have 'enc_in' set before building the model. Call _tune_hyper_params() first.")
         self.model = DUETProbModel(self.config)
+
+    def _setup_gating_logger(self):
+        """Initialisiert einen separaten Logger für die Gating-Analyse."""
+        if not getattr(self.config, 'debug_gating', False) or not hasattr(self.config, 'log_dir'):
+            return
+
+        log_path = os.path.join(self.config.log_dir, 'gating_analysis.log')
+        self.gating_logger = logging.getLogger(f"gating_analysis_{self.config.log_dir}")
+        self.gating_logger.setLevel(logging.DEBUG)
+        
+        # Verhindert, dass Logs an den Root-Logger weitergegeben werden
+        self.gating_logger.propagate = False
+
+        # Fügt einen FileHandler hinzu, wenn noch keiner existiert
+        if not self.gating_logger.handlers:
+            file_handler = logging.FileHandler(log_path, mode='w')
+            formatter = logging.Formatter('%(asctime)s - %(message)s')
+            file_handler.setFormatter(formatter)
+            self.gating_logger.addHandler(file_handler)
+
+    def _log_gating_analysis(self, epoch: int, phase: str, batch_data: tuple, device: torch.device):
+        """Loggt die Gating-Gewichte und den Loss für den ersten Batch einer Epoche."""
+        if not self.gating_logger:
+            return
+
+        self.model.eval() # In den Eval-Modus für eine saubere Analyse
+        with torch.no_grad():
+            input_data, target, _, _ = batch_data
+            input_data = input_data.to(device)
+            target = target.to(device)
+
+            denorm_distr, _, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, _, _, _, _, _, _ = self.model(input_data)
+            
+            target_horizon = target[:, -self.config.horizon:, :]
+            nll_loss = -denorm_distr.log_prob(target_horizon).mean()
+            total_loss = nll_loss + self.config.loss_coef * loss_importance
+
+            log_msg = f"Epoch: {epoch:<3} | Phase: {phase:<10} | Batch Loss: {total_loss.item():.4f}"
+            
+            if batch_gate_weights_linear.numel() > 0:
+                mean_w = batch_gate_weights_linear.mean().item()
+                std_w = batch_gate_weights_linear.std().item()
+                log_msg += f" | Linear Weights: μ={mean_w:.3f}, σ={std_w:.3f}"
+
+            if batch_gate_weights_uni_esn.numel() > 0:
+                mean_w = batch_gate_weights_uni_esn.mean().item()
+                std_w = batch_gate_weights_uni_esn.std().item()
+                log_msg += f" | Univariate ESN Weights: μ={mean_w:.3f}, σ={std_w:.3f}"
+
+            if batch_gate_weights_multi_esn.numel() > 0:
+                mean_w = batch_gate_weights_multi_esn.mean().item()
+                std_w = batch_gate_weights_multi_esn.std().item()
+                log_msg += f" | Multivariate ESN Weights: μ={mean_w:.3f}, σ={std_w:.3f}"
+
+            self.gating_logger.info(log_msg)
+
+        self.model.train() # Zurück in den Trainingsmodus
 
 
     def _tune_hyper_params(self, train_valid_data: pd.DataFrame):
@@ -399,6 +457,8 @@ class DUETProb(ModelBase):
         setattr(config, 'log_dir', log_dir)
         writer = SummaryWriter(log_dir)
 
+        self._setup_gating_logger()
+
         model_save_path = os.path.join(log_dir, 'best_model.pt')
         
         self._build_model()
@@ -488,6 +548,11 @@ class DUETProb(ModelBase):
                 epoch_start_time = time.time()
                 self.model.train()
                 
+                # --- Gating-Analyse für den ersten Trainings-Batch ---
+                if self.gating_logger:
+                    first_batch = next(iter(train_data_loader))
+                    self._log_gating_analysis(epoch, "Training", first_batch, device)
+
                 epoch_total_losses, epoch_importance_losses, epoch_normalized_losses, epoch_denorm_losses_per_channel = [], [], [], []
 
                 total_experts = config.num_linear_experts + config.num_univariate_esn_experts + config.num_multivariate_esn_experts
@@ -824,6 +889,11 @@ Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
         all_denorm_losses, all_norm_losses = [], []
         self.model.eval()
         with torch.no_grad():
+            # --- Gating-Analyse für den ersten Validierungs-Batch ---
+            if self.gating_logger and epoch is not None:
+                first_batch = next(iter(valid_data_loader))
+                self._log_gating_analysis(epoch, "Validation", first_batch, device)
+
             validation_loop = tqdm(
                 valid_data_loader,
                 desc=desc,
