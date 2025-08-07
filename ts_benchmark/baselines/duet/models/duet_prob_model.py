@@ -251,6 +251,7 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
         """
         esn_uni_readout_params = []
         esn_multi_readout_params = []
+        projection_head_params = []
         other_params = []
 
         for name, param in self.named_parameters():
@@ -269,7 +270,9 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
                         other_params.append(param)
                 except (ValueError, IndexError):
                     other_params.append(param)
+            elif 'projection_heads.' in name:
+                projection_head_params.append(param)
             else:
                 other_params.append(param)
         
-        return esn_uni_readout_params, esn_multi_readout_params, other_params
+        return esn_uni_readout_params, esn_multi_readout_params, projection_head_params, other_params

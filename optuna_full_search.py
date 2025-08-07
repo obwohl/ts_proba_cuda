@@ -102,7 +102,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params["fc_dropout"] = trial.suggest_float("fc_dropout", 0.0, 0.1)
     
     # Optuna schlägt die exakte Batch-Größe vor, die verwendet werden soll.
-    params["batch_size"] = trial.suggest_categorical("batch_size", [256])
+    params["batch_size"] = trial.suggest_categorical("batch_size", [128, 256, 512])
 
 
     params["use_agc"] = trial.suggest_categorical("use_agc", [True, False])
@@ -126,7 +126,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     # Set k to the rounded square root of total_experts for simplicity
     params["k"] = int(torch.round(torch.sqrt(torch.tensor(total_experts))).item())
 
-    params["hidden_size"] = trial.suggest_categorical("hidden_size", [256, 512])
+    params["hidden_size"] = trial.suggest_categorical("hidden_size", [128, 256, 512])
 
     # Schlage univariaten ESN-Parameter vor, wenn diese Experten verwendet werden.
     if params["num_univariate_esn_experts"] > 0:
@@ -158,6 +158,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     if params["projection_head_layers"] > 0:
         params["projection_head_dim_factor"] = trial.suggest_categorical("projection_head_dim_factor", [1, 2, 4, 8])
         params["projection_head_dropout"] = trial.suggest_float("projection_head_dropout", 0.0, 0.1)
+        params["projection_head_weight_decay"] = trial.suggest_float("projection_head_weight_decay", 1e-6, 1e-2, log=True)
 
     
 

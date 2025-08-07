@@ -139,6 +139,7 @@ class TransformerConfig:
             "projection_head_layers": 0,
             "projection_head_dim_factor": 2,
             "projection_head_dropout": 0.1,
+            "projection_head_weight_decay": 0.0,
 
             # --- NEW: Interim Validation ---
             "interim_validation_seconds": None,
@@ -424,9 +425,14 @@ class DUETProb(ModelBase):
 
                         # Apply sigmoid to pi_raw to get actual pi probability
                         pi = torch.sigmoid(pi_raw).squeeze(-1).cpu().numpy()
-                        kappa = kappa_raw.squeeze(-1).cpu().numpy()
-                        sigma = sigma_raw.squeeze(-1).cpu().numpy()
-                        xi = xi.squeeze(-1).cpu().numpy()
+                        
+                        # Get the actual kappa and sigma from the base_distr
+                        # base_distr is ZeroInflatedExtendedGPD_M1_Continuous
+                        # We need to ensure we are getting the correct channel's parameters
+                        # This assumes base_distr.kappa and base_distr.sigma are already processed (softplus + epsilon)
+                        kappa = base_distr.kappa[0, channel_idx, :].squeeze(-1).cpu().numpy()
+                        sigma = base_distr.sigma[0, channel_idx, :].squeeze(-1).cpu().numpy()
+                        xi = base_distr.xi[0, channel_idx, :].squeeze(-1).cpu().numpy()
 
                         # Plot each parameter
                         param_plots = {
@@ -503,7 +509,7 @@ class DUETProb(ModelBase):
         print("--- Setting up optimizer with targeted weight decay for ESN readouts... ---")
         
         model_ref = self.model.module if hasattr(self.model, 'module') else self.model
-        esn_uni_readout_params, esn_multi_readout_params, other_params = model_ref.get_parameter_groups()
+        esn_uni_readout_params, esn_multi_readout_params, projection_head_params, other_params = model_ref.get_parameter_groups()
         optimizer_grouped_parameters = [{'params': other_params, 'weight_decay': 0.0}]
 
         if esn_uni_readout_params and config.esn_uni_weight_decay > 0:
@@ -513,6 +519,10 @@ class DUETProb(ModelBase):
         if esn_multi_readout_params and config.esn_multi_weight_decay > 0:
             optimizer_grouped_parameters.append({'params': esn_multi_readout_params, 'weight_decay': config.esn_multi_weight_decay})
             print(f"  -> Applying weight_decay={config.esn_multi_weight_decay:.2e} to {len(esn_multi_readout_params)} multivariate ESN readout parameters.")
+
+        if projection_head_params and config.projection_head_weight_decay > 0:
+            optimizer_grouped_parameters.append({'params': projection_head_params, 'weight_decay': config.projection_head_weight_decay})
+            print(f"  -> Applying weight_decay={config.projection_head_weight_decay:.2e} to {len(projection_head_params)} projection head parameters.")
         
         print(f"  -> {len(other_params)} other parameters will have no weight decay.")
         print("--------------------------------------------------------------------")
