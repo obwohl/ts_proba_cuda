@@ -74,15 +74,15 @@ class RevIN(nn.Module):
             
         elif self.norm_mode == 'subtract_last':
             # Location is the last value in the sequence.
-            self.location_stat = x[:, -1:, :] # CORRECTED: .detach() removed
+            self.location_stat = x[:, -1:, :].detach()
             # Scale is the RMS of the sequence after subtracting the location.
             x_centered = x - self.location_stat
             
-            self.scale_stat = torch.sqrt(torch.mean(x_centered**2, dim=1, keepdim=True) + self.eps) # CORRECTED: .detach() removed
+            self.scale_stat = torch.sqrt(torch.mean(x_centered**2, dim=1, keepdim=True) + self.eps).detach()
 
         elif self.norm_mode == 'subtract_median':
             # Location is the median value of the sequence.
-            self.location_stat = torch.median(x, dim=1, keepdim=True)[0]
+            self.location_stat = torch.median(x, dim=1, keepdim=True)[0].detach()
 
             # Calculate scale_stat based on non-zero values for robustness (using MAD)
             # Reshape x to [Batch, NumFeatures, SeqLen] for easier per-channel processing
@@ -108,7 +108,7 @@ class RevIN(nn.Module):
                         # Fallback for channels with all zeros or very few non-zero values
                         scale_stats_per_channel[b, n, 0] = 1.0 + self.eps # Use a default scale of 1.0
 
-            self.scale_stat = scale_stats_per_channel.permute(0, 2, 1) # Reshape back to [Batch, 1, NumFeatures]
+            self.scale_stat = scale_stats_per_channel.permute(0, 2, 1).detach() # Reshape back to [Batch, 1, NumFeatures]
 
     
             
