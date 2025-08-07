@@ -348,8 +348,9 @@ class TestIntegrationWithDuetProb(unittest.TestCase):
             num_linear_experts=1,
             num_univariate_esn_experts=1,
             num_multivariate_esn_experts=0,
-            johnson_channel_types=self.channel_types,
-            channel_bounds={'channel_0': {'lower': 0, 'upper': 1}, 'channel_1': {'lower': 0, 'upper': 1}, 'channel_2': {'lower': 0, 'upper': 1}, 'channel_3': {'lower': 0, 'upper': 1}}
+            channel_types=self.channel_types,
+            channel_bounds={'channel_0': {'lower': 0, 'upper': 1}, 'channel_1': {'lower': 0, 'upper': 1}, 'channel_2': {'lower': 0, 'upper': 1}, 'channel_3': {'lower': 0, 'upper': 1}},
+            noise_epsilon=1e-2
         )
 
         # Build the model
@@ -363,7 +364,7 @@ class TestIntegrationWithDuetProb(unittest.TestCase):
         input_tensor = torch.randn(batch_size, self.seq_len, self.n_vars, device=self.device)
 
         # The model returns multiple values, we are interested in the first one (the distribution)
-        denorm_distr, base_distr, _, _, _, _, _, _, _ = self.model(input_tensor)
+        denorm_distr, base_distr, _, _, _, _, _, _, _, _, _, _ = self.model(input_tensor)
 
         # Check if the output is the correct distribution type
         self.assertIsInstance(denorm_distr, DenormalizingDistribution)

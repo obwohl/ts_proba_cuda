@@ -33,8 +33,10 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
             STD_FLOOR = 1e-6  # Safety floor for the standard deviation
             self._std = torch.clamp(stats[:, :, 1], min=STD_FLOOR).unsqueeze(-1)
         else:
-            self._mean = None
-            self._std = None
+            # Provide default mean=0 and std=1 if stats are not provided.
+            # This is important for tests that instantiate the distribution directly.
+            self._mean = torch.zeros_like(self.pi)
+            self._std = torch.ones_like(self.pi)
 
         super().__init__(self.pi.shape, validate_args=validate_args)
     
@@ -88,12 +90,17 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
         # The check for zeros must happen on the raw data.
         log_probs = torch.zeros_like(value, dtype=value.dtype, device=value.device)
 
-        # Case 1: value == 0 (zero-inflated part)
-        zero_mask = (value == 0)
-        log_probs[zero_mask] = torch.log(self.pi[zero_mask])
+        # Case 1: value is zero or extremely close to it (zero-inflated part)
+        # Using a tolerance to handle floating point inaccuracies.
+        zero_mask = torch.abs(value) < 1e-9
+        if self.pi.dim() > 0:
+            log_probs[zero_mask] = torch.log(self.pi[zero_mask])
+        elif zero_mask.all():
+            log_probs = torch.log(self.pi)
 
         # Case 2: value > 0 (Extended GPD part)
-        positive_mask = (value > 0)
+        # The positive mask must exclude the values already handled by the zero mask.
+        positive_mask = (value > 0) & (~zero_mask)
         if torch.any(positive_mask):
             v_pos = value[positive_mask]
 
@@ -105,10 +112,16 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
             v_pos_norm = (v_pos - mean_expanded) / std_expanded
             # --- End Internal Normalization ---
 
-            k_pos = kappa[positive_mask]
-            s_pos = sigma[positive_mask]
-            x_pos = xi[positive_mask]
-            pi_pos = self.pi[positive_mask]
+            if kappa.dim() > 0:
+                k_pos = kappa[positive_mask]
+                s_pos = sigma[positive_mask]
+                x_pos = xi[positive_mask]
+                pi_pos = self.pi[positive_mask]
+            else:
+                k_pos = kappa
+                s_pos = sigma
+                x_pos = xi
+                pi_pos = self.pi
 
             # Calculate F(z) and f(z) for the base GPD on NORMALIZED data
             gpd_cdf_val = self._gpd_cdf(v_pos_norm, s_pos, x_pos)
