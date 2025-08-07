@@ -11,18 +11,19 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
         'pi_raw': constraints.real,          # Raw logit for pi (sigmoid applied)
         'kappa_raw': constraints.real,       # Raw parameter for kappa (softplus applied)
         'sigma_raw': constraints.real,       # Raw parameter for sigma (softplus applied)
-        'xi': constraints.real               # Shape parameter xi
+        'xi_raw': constraints.real           # Raw shape parameter xi (tanh applied)
     }
     support = constraints.greater_than_eq(0.0) # Continuous non-negative support
 
     has_rsample = False # For now, no reparameterization trick
 
-    def __init__(self, pi_raw, kappa_raw, sigma_raw, xi, stats: torch.Tensor = None, validate_args=True):
+    def __init__(self, pi_raw, kappa_raw, sigma_raw, xi_raw, stats: torch.Tensor = None, validate_args=True):
         # Broadcast all parameters to ensure consistent shape
-        self.pi_raw, self.kappa_raw, self.sigma_raw, self.xi = broadcast_all(pi_raw, kappa_raw, sigma_raw, xi)
+        self.pi_raw, self.kappa_raw, self.sigma_raw, self.xi_raw = broadcast_all(pi_raw, kappa_raw, sigma_raw, xi_raw)
         
         # Apply transformations to get valid distribution parameters
         self.pi = torch.clamp(torch.sigmoid(self.pi_raw), min=1e-6, max=1-1e-6)
+        self.xi = 0.5 * torch.tanh(self.xi_raw) # Constrain xi to [-0.5, 0.5] for stability
         # self.kappa = torch.exp(self.kappa_raw) + 1e-6 # Add epsilon for stability
         # self.sigma = torch.exp(self.sigma_raw) + 1e-6 # Add epsilon for stability
         

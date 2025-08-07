@@ -19,9 +19,9 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
         pi_raw = torch.randn(batch_size, n_vars, horizon) # Use raw logits
         kappa_raw = torch.randn(batch_size, n_vars, horizon)
         sigma_raw = torch.randn(batch_size, n_vars, horizon)
-        xi = torch.randn(batch_size, n_vars, horizon)
+        xi_raw = torch.randn(batch_size, n_vars, horizon)
 
-        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi_raw, kappa_raw, sigma_raw, xi)
+        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi_raw, kappa_raw, sigma_raw, xi_raw)
 
         # Test log_prob shape
         values = torch.rand(batch_size, horizon, n_vars) # Shape [B, H, N_vars]
@@ -42,7 +42,8 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
         print("\n--- Running Test: Zero-Inflation log_prob ---")
         pi_prob = torch.tensor([[[0.25]]])
         pi_raw = torch.log(pi_prob / (1 - pi_prob)) # Convert to logit
-        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi_raw, torch.tensor([[[1.0]]]), torch.tensor([[[1.0]]]), torch.tensor([[[0.1]]]))
+        xi_raw = torch.atanh(2 * torch.tensor([[[0.1]]]))
+        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi_raw, torch.tensor([[[1.0]]]), torch.tensor([[[1.0]]]), xi_raw)
         
         # Value at zero
         values = torch.zeros(1, 1, 1)
@@ -58,7 +59,8 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
         pi_val = 0.3
         pi_prob = torch.tensor([[[pi_val]]])
         pi_raw = torch.log(pi_prob / (1 - pi_prob)) # Convert to logit
-        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi_raw, torch.tensor([[[1.0]]]), torch.tensor([[[1.0]]]), torch.tensor([[[0.1]]]))
+        xi_raw = torch.atanh(2 * torch.tensor([[[0.1]]]))
+        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi_raw, torch.tensor([[[1.0]]]), torch.tensor([[[1.0]]]), xi_raw)
 
         # Quantiles less than or equal to pi
         quantiles = torch.tensor([0.0, 0.1, pi_val])
@@ -81,7 +83,7 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
             pi_raw=torch.tensor(-2.1972), # logit for 0.1
             kappa_raw=torch.tensor(1.0), 
             sigma_raw=torch.tensor(1.0), 
-            xi=torch.tensor(0.1)
+            xi_raw=torch.atanh(2 * torch.tensor(0.1))
         )
         
         values = torch.tensor([-1.0, -0.001])
@@ -94,21 +96,28 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
         """Tests the special case where xi is close to zero (should be exponential)."""
         print("\n--- Running Test: xi -> 0 (Exponential case) ---")
         
-        # To make kappa = 1.0, we need exp(kappa_raw) + 1e-6 = 1.0
-        # exp(kappa_raw) = 1.0 - 1e-6
-        # kappa_raw = log(1.0 - 1e-6)
-        kappa_raw_for_one = torch.log(torch.tensor(1.0 - 1e-6))
+        # This test was outdated. The transformation for kappa/sigma changed from exp to scaled_sigmoid.
+        # We now calculate the inverse of `y = 10 * sigmoid(x) + 1e-6` to get the correct raw values.
+        # x = inverse_sigmoid((y - 1e-6) / 10)
 
-        # To make sigma = 2.0, we need exp(sigma_raw) + 1e-6 = 2.0
-        # exp(sigma_raw) = 2.0 - 1e-6
-        # sigma_raw = log(2.0 - 1e-6)
-        sigma_raw_for_two = torch.log(torch.tensor(2.0 - 1e-6))
+        def inverse_sigmoid(y):
+            # Add clamp for stability if y is close to 0 or 1
+            y = torch.clamp(y, 1e-9, 1 - 1e-9)
+            return torch.log(y / (1 - y))
+
+        # To make kappa = 1.0
+        p_kappa = (1.0 - 1e-6) / 10.0
+        kappa_raw_for_one = inverse_sigmoid(torch.tensor(p_kappa))
+
+        # To make sigma = 2.0
+        p_sigma = (2.0 - 1e-6) / 10.0
+        sigma_raw_for_two = inverse_sigmoid(torch.tensor(p_sigma))
 
         dist = ZeroInflatedExtendedGPD_M1_Continuous(
             pi_raw=torch.tensor(-float('inf')), # logit for 0.0
             kappa_raw=kappa_raw_for_one,
             sigma_raw=sigma_raw_for_two, # sigma=2
-            xi=torch.tensor(1e-10) # xi is very close to 0
+            xi_raw=torch.atanh(torch.tensor(2e-10)) # xi is very close to 0
         )
         
         # When pi=0 and kappa=1, ZIEGPD is just GPD.
@@ -131,9 +140,9 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
         pi_raw = torch.randn(2) # logits
         kappa_raw = torch.randn(2)
         sigma_raw = torch.randn(2)
-        xi = torch.randn(2)
+        xi_raw = torch.randn(2)
         
-        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi_raw, kappa_raw, sigma_raw, xi)
+        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi_raw, kappa_raw, sigma_raw, xi_raw)
         
         # Test with some positive values
         x = torch.tensor([0.1, 1.0, 5.0, 20.0])
@@ -168,7 +177,7 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
             pi_raw=torch.tensor(-2.1972), # logit for 0.1
             kappa_raw=torch.tensor(0.5),
             sigma_raw=torch.tensor(0.8),
-            xi=torch.tensor(0.2)
+            xi_raw=torch.atanh(2 * torch.tensor(0.2))
         )
         x_val = dist_single.icdf(q)
         
