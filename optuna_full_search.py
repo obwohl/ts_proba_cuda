@@ -28,7 +28,7 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 logging.getLogger("optuna").setLevel(logging.INFO)
 
 FIXED_PARAMS = {
-    "data_file": "causal_1.csv",
+    "data_file": "preci_short.csv", 
     "horizon": 24,
     "train_ratio_in_tv": 0.8, # NEU: Split-Verhältnis explizit gemacht
     # --- NEU: Wähle die zu optimierende Metrik ---
@@ -38,7 +38,7 @@ FIXED_PARAMS = {
     # Setze hier einen Kanalnamen (z.B. "wassertemp"), um den Validierungs-Loss nur für diesen Kanal zu berechnen.
     # Setze auf `None`, um den Durchschnitt über alle Kanäle zu verwenden (Standardverhalten).
     "optimization_target_channel": None,
-    "num_epochs":5,
+    "num_epochs":20,
     "patience": 2,
     "early_stopping_delta": 1e-4,
     "debug_gating": True, # NEU: Schalter für detailliertes Gating-Logging
@@ -169,9 +169,8 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
 
     return params
 
-def objective(trial: optuna.Trial, data: pd.DataFrame, study_name: str) -> float:
+def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
     """Führt einen Trainingslauf durch und gibt die beiden Zielmetriken (avg_crps, cvar_crps) zurück."""
-    print("--- INSIDE OBJECTIVE FUNCTION ---")
     trial_num = trial.number
     print(f"\n\n{'='*20} STARTING TRIAL #{trial_num} {'='*20}")
     
@@ -182,10 +181,10 @@ def objective(trial: optuna.Trial, data: pd.DataFrame, study_name: str) -> float
     for key, value in model_hyper_params.items():
         print(f"  - {key}: {value}")
 
-    save_dir = f"results/optuna_heuristic/{study_name}/trial_{trial_num}"
+    save_dir = f"results/optuna_heuristic/{STUDY_NAME}/trial_{trial_num}"
     os.makedirs(save_dir, exist_ok=True)
     model_hyper_params['log_dir'] = save_dir
-    model_hyper_params['study_name'] = study_name
+    model_hyper_params['study_name'] = STUDY_NAME
     model_hyper_params['trial_num'] = trial_num
 
     model = None # Ensure model is defined in the outer scope for the finally block
@@ -316,17 +315,11 @@ if __name__ == "__main__":
     STUDY_NAME = args.study_name
     STORAGE_NAME = args.storage_name
 
-    try:
-        optuna.delete_study(study_name=STUDY_NAME, storage=STORAGE_NAME)
-        print(f"Study '{STUDY_NAME}' deleted.")
-    except:
-        pass
-
     study = optuna.create_study(
         study_name=STUDY_NAME,
         storage=STORAGE_NAME,
         direction="minimize", # Wir optimieren jetzt eine einzelne Metrik
-        load_if_exists=False, # Wichtig, um die Studie fortzusetzen
+        load_if_exists=True, # Wichtig, um die Studie fortzusetzen
         pruner=HyperbandPruner(
             min_resource=FIXED_PARAMS["min_epochs_for_pruning"],
             max_resource=FIXED_PARAMS["num_epochs"], # Die maximale Ressource ist die Gesamtzahl der Epochen
@@ -352,7 +345,7 @@ if __name__ == "__main__":
     # Führe die Optimierung ohne festes n_trials aus.
     # Der Worker läuft so lange, bis er extern beendet wird (z.B. durch Strg+C im run_study.py Skript).
     # Dies ist die Standardmethode für parallele Studien, bei denen die Gesamtzahl der Trials nicht pro Worker festgelegt wird.
-    study.optimize(lambda trial: objective(trial, data, STUDY_NAME), n_trials=1)
+    study.optimize(lambda trial: objective(trial, data), n_trials=None)
 
     print("\n\n" + "="*50 + "\nHEURISTIC SEARCH FINISHED\n" + "="*50)
     try:
