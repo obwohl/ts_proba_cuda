@@ -66,5 +66,5 @@ class ExtendedGPDOutput:
         # print(f"DEBUG: ExtendedGPDOutput - xi | Shape: {xi.shape} | Mean: {xi.mean():.4f} | Std: {xi.std():.4f} | Min: {xi.min():.4f} | Max: {xi.max():.4f}")
 
         return ZeroInflatedExtendedGPD_M1_Continuous(
-            pi_raw=pi_raw, kappa_raw=kappa_raw, sigma_raw=sigma_raw, xi=xi, stats=stats
+            pi_raw=pi_raw, kappa_raw=kappa_raw, sigma_raw=sigma_raw, xi_raw=xi, stats=stats
         )

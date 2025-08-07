@@ -23,10 +23,8 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
         
         # Apply transformations to get valid distribution parameters
         self.pi = torch.clamp(torch.sigmoid(self.pi_raw), min=1e-6, max=1-1e-6)
-        self.xi = 0.5 * torch.tanh(self.xi_raw) # Constrain xi to [-0.5, 0.5] for stability
-        # self.kappa = torch.exp(self.kappa_raw) + 1e-6 # Add epsilon for stability
-        # self.sigma = torch.exp(self.sigma_raw) + 1e-6 # Add epsilon for stability
-        
+        self.xi = 1.0 * torch.tanh(self.xi_raw) # Constrain xi to [-0.5, 0.5] for stability
+
         SCALE_FACTOR = 10.0 
         self.kappa = SCALE_FACTOR * torch.sigmoid(self.kappa_raw) + 1e-6
         self.sigma = SCALE_FACTOR * torch.sigmoid(self.sigma_raw) + 1e-6
