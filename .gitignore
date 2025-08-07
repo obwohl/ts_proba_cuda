@@ -1,4 +1,4 @@
-*.csv
+dataset/more_csvs/
 result/
 results/
 figures/
@@ -24,3 +24,9 @@ metadata.json
 
 inference_checkpoints/
 *.png
+
+# optuna database
+*.db
+
+# no more checkpoints
+checkpoints/
