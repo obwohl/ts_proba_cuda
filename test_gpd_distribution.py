@@ -94,15 +94,20 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
         """Tests the special case where xi is close to zero (should be exponential)."""
         print("\n--- Running Test: xi -> 0 (Exponential case) ---")
         
-        # To make kappa = 1.0, we need softplus(kappa_raw) + 1e-6 = 1.0
-        # softplus(kappa_raw) = 1.0 - 1e-6
-        # kappa_raw = log(exp(1.0 - 1e-6) - 1)
-        kappa_raw_for_one = torch.log(torch.exp(torch.tensor(1.0 - 1e-6)) - 1)
+        # To make kappa = 1.0, we need exp(kappa_raw) + 1e-6 = 1.0
+        # exp(kappa_raw) = 1.0 - 1e-6
+        # kappa_raw = log(1.0 - 1e-6)
+        kappa_raw_for_one = torch.log(torch.tensor(1.0 - 1e-6))
+
+        # To make sigma = 2.0, we need exp(sigma_raw) + 1e-6 = 2.0
+        # exp(sigma_raw) = 2.0 - 1e-6
+        # sigma_raw = log(2.0 - 1e-6)
+        sigma_raw_for_two = torch.log(torch.tensor(2.0 - 1e-6))
 
         dist = ZeroInflatedExtendedGPD_M1_Continuous(
             pi_raw=torch.tensor(-float('inf')), # logit for 0.0
-            kappa_raw=kappa_raw_for_one, 
-            sigma_raw=torch.log(torch.exp(torch.tensor(2.0)) - 1), # sigma=2
+            kappa_raw=kappa_raw_for_one,
+            sigma_raw=sigma_raw_for_two, # sigma=2
             xi=torch.tensor(1e-10) # xi is very close to 0
         )
         

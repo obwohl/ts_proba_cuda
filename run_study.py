@@ -8,7 +8,7 @@ import uuid
 import signal
 
 # -- Studien-Konfiguration --
-STUDY_NAME = "preci_short"
+STUDY_NAME = "single_run"
 STORAGE_NAME = "sqlite:///optuna_study.db"  # Fester DB-Name. Studien werden intern durch STUDY_NAME unterschieden.
 
 # -- Parallelisierungs-Konfiguration --
@@ -145,7 +145,9 @@ def run_workers(study_name, storage_name, num_trials, workers_per_trial):
                 "--storage-name", storage_name
             ],
             env=env,
-            preexec_fn=os.setsid # WICHTIG: Startet den Worker in einer neuen Prozessgruppe
+            preexec_fn=os.setsid, # WICHTIG: Startet den Worker in einer neuen Prozessgruppe
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
         processes.append(process)
 
@@ -163,6 +165,8 @@ def run_workers(study_name, storage_name, num_trials, workers_per_trial):
 
     try:
         for p in processes:
+            output, _ = p.communicate()
+            print(output.decode('utf-8'))
             p.wait()  # Warte, bis alle Prozesse beendet sind.
     except KeyboardInterrupt:
         print("\nStrg+C erkannt. Terminiere alle Worker-Prozesse...")

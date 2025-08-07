@@ -30,11 +30,13 @@ def run_forecast(checkpoint_path: Path, data_path: Path, output_path: Path):
     try:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         config_dict = checkpoint['config_dict']
+        config_dict['distribution_family'] = 'ZIEGPD_M1'  # Override distribution family
         config = TransformerConfig(**config_dict)
         # Wichtig: Setze die Quantile in der Konfiguration, die das Modell für die Vorhersage verwenden soll.
         config.quantiles = QUANTILES_TO_PREDICT
+        config.channel_types = SERIES_ORDER
         model = DUETProbModel(config)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         model.to(device)
         model.eval()
         print("✅ Model loaded successfully.")
