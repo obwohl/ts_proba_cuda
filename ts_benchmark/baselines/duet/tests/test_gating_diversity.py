@@ -16,6 +16,7 @@ def test_gating_diversity():
     config.k = 3 # Number of top experts to select
     config.norm_mode = 'subtract_median' # Required by RevIN
     config.expert_embedding_dim = 16 # NEW: Add expert embedding dimension
+    config.noise_epsilon = 1e-2
 
     config.moving_avg = 25 # Add a concrete integer value for moving_avg
 
@@ -54,7 +55,7 @@ def test_gating_diversity():
     all_selection_counts = []
 
     for _ in range(num_iterations):
-        y, loss_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts = model(x)
+        y, loss_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, _, _ = model(x)
         
         if avg_gate_weights_linear.numel() > 0:
             all_gate_weights_linear.append(avg_gate_weights_linear.detach().cpu().numpy())

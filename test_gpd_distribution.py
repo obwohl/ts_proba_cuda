@@ -16,17 +16,18 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
         
         # Parameters with a batch shape of [2, 3] and horizon of 4
         batch_size, n_vars, horizon = 2, 3, 4
-        pi = torch.rand(batch_size, n_vars, horizon)
+        pi_raw = torch.randn(batch_size, n_vars, horizon) # Use raw logits
         kappa_raw = torch.randn(batch_size, n_vars, horizon)
         sigma_raw = torch.randn(batch_size, n_vars, horizon)
         xi = torch.randn(batch_size, n_vars, horizon)
 
-        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi, kappa_raw, sigma_raw, xi)
+        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi_raw, kappa_raw, sigma_raw, xi)
 
         # Test log_prob shape
         values = torch.rand(batch_size, horizon, n_vars) # Shape [B, H, N_vars]
         log_probs = dist.log_prob(values)
-        self.assertEqual(log_probs.shape, values.shape)
+        # The log_prob function permutes the output to be [B, N_vars, H]
+        self.assertEqual(log_probs.shape, (batch_size, n_vars, horizon))
         print(f"log_prob input shape: {values.shape}, output shape: {log_probs.shape} -> OK")
 
         # Test icdf shape
@@ -39,23 +40,25 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
     def test_zero_inflation_log_prob(self):
         """Tests the log_prob for values at zero."""
         print("\n--- Running Test: Zero-Inflation log_prob ---")
-        pi = torch.tensor([[[0.25]]])
-        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi, torch.tensor([[[1.0]]]), torch.tensor([[[1.0]]]), torch.tensor([[[0.1]]]))
+        pi_prob = torch.tensor([[[0.25]]])
+        pi_raw = torch.log(pi_prob / (1 - pi_prob)) # Convert to logit
+        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi_raw, torch.tensor([[[1.0]]]), torch.tensor([[[1.0]]]), torch.tensor([[[0.1]]]))
         
         # Value at zero
         values = torch.zeros(1, 1, 1)
         log_prob_at_zero = dist.log_prob(values)
         
         # The probability of being zero is pi. So log_prob should be log(pi).
-        self.assertTrue(torch.allclose(log_prob_at_zero, torch.log(pi)))
-        print(f"log_prob(0) matches log(pi): {log_prob_at_zero.item():.4f} vs {torch.log(pi).item():.4f} -> OK")
+        self.assertTrue(torch.allclose(log_prob_at_zero, torch.log(pi_prob)))
+        print(f"log_prob(0) matches log(pi): {log_prob_at_zero.item():.4f} vs {torch.log(pi_prob).item():.4f} -> OK")
 
     def test_zero_inflation_icdf(self):
         """Tests the icdf for quantiles within the zero-inflation mass."""
         print("\n--- Running Test: Zero-Inflation icdf ---")
         pi_val = 0.3
-        pi = torch.tensor([[[pi_val]]])
-        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi, torch.tensor([[[1.0]]]), torch.tensor([[[1.0]]]), torch.tensor([[[0.1]]]))
+        pi_prob = torch.tensor([[[pi_val]]])
+        pi_raw = torch.log(pi_prob / (1 - pi_prob)) # Convert to logit
+        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi_raw, torch.tensor([[[1.0]]]), torch.tensor([[[1.0]]]), torch.tensor([[[0.1]]]))
 
         # Quantiles less than or equal to pi
         quantiles = torch.tensor([0.0, 0.1, pi_val])
@@ -75,7 +78,7 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
         """Tests that log_prob of negative values is -inf."""
         print("\n--- Running Test: Support Boundary (value < 0) ---")
         dist = ZeroInflatedExtendedGPD_M1_Continuous(
-            pi=torch.tensor(0.1), 
+            pi_raw=torch.tensor(-2.1972), # logit for 0.1
             kappa_raw=torch.tensor(1.0), 
             sigma_raw=torch.tensor(1.0), 
             xi=torch.tensor(0.1)
@@ -97,7 +100,7 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
         kappa_raw_for_one = torch.log(torch.exp(torch.tensor(1.0 - 1e-6)) - 1)
 
         dist = ZeroInflatedExtendedGPD_M1_Continuous(
-            pi=torch.tensor(0.0), # No zero inflation for this test
+            pi_raw=torch.tensor(-float('inf')), # logit for 0.0
             kappa_raw=kappa_raw_for_one, 
             sigma_raw=torch.log(torch.exp(torch.tensor(2.0)) - 1), # sigma=2
             xi=torch.tensor(1e-10) # xi is very close to 0
@@ -120,12 +123,12 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
     def test_inverse_function_property(self):
         """Tests if icdf(cdf(x)) is close to x."""
         print("\n--- Running Test: Inverse Function Property (icdf(cdf(x)) ~= x) ---")
-        pi = torch.tensor([0.1, 0.5])
+        pi_raw = torch.randn(2) # logits
         kappa_raw = torch.randn(2)
         sigma_raw = torch.randn(2)
         xi = torch.randn(2)
         
-        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi, kappa_raw, sigma_raw, xi)
+        dist = ZeroInflatedExtendedGPD_M1_Continuous(pi_raw, kappa_raw, sigma_raw, xi)
         
         # Test with some positive values
         x = torch.tensor([0.1, 1.0, 5.0, 20.0])
@@ -145,7 +148,7 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
         q = torch.tensor([0.6, 0.8, 0.95]) # Quantiles > max(pi)
         
         # Expand shapes for broadcasting
-        pi_exp = pi.unsqueeze(-1)
+        pi_exp = dist.pi.unsqueeze(-1)
         kappa_exp = dist.kappa.unsqueeze(-1)
         sigma_exp = dist.sigma.unsqueeze(-1)
         xi_exp = dist.xi.unsqueeze(-1)
@@ -157,7 +160,10 @@ class TestZeroInflatedExtendedGPD(unittest.TestCase):
         # x_from_icdf has shape [2, 1, 3], need to align for _gpd_cdf
         # Let's simplify test to a single parameter set
         dist_single = ZeroInflatedExtendedGPD_M1_Continuous(
-            torch.tensor(0.1), torch.tensor(0.5), torch.tensor(0.8), torch.tensor(0.2)
+            pi_raw=torch.tensor(-2.1972), # logit for 0.1
+            kappa_raw=torch.tensor(0.5),
+            sigma_raw=torch.tensor(0.8),
+            xi=torch.tensor(0.2)
         )
         x_val = dist_single.icdf(q)
         
