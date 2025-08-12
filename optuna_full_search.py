@@ -80,7 +80,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params = {}
     params["seq_len"] = trial.suggest_categorical("seq_len", [96,192, 384, 480])
     params["norm_mode"] = trial.suggest_categorical("norm_mode", ["subtract_median"]) # "subtract_last" deaktiviert
-    params["lr"] = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
+    params["lr"] = trial.suggest_float("lr", 1e-5, 1e-4, log=True)
     params["d_model"] = trial.suggest_categorical("d_model", [128, 256, 512])
     params["d_ff"] = trial.suggest_categorical("d_ff", [128, 256, 512])
     params["e_layers"] = trial.suggest_int("e_layers", 1, 3)
