@@ -80,7 +80,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params = {}
     params["seq_len"] = trial.suggest_categorical("seq_len", [96,192, 384, 480])
     params["norm_mode"] = trial.suggest_categorical("norm_mode", ["subtract_median"]) # "subtract_last" deaktiviert
-    params["lr"] = trial.suggest_float("lr", 5e-5, 1e-4, log=True)
+    params["lr"] = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
     params["d_model"] = trial.suggest_categorical("d_model", [128, 256, 512])
     params["d_ff"] = trial.suggest_categorical("d_ff", [128, 256, 512])
     params["e_layers"] = trial.suggest_int("e_layers", 1, 3)
@@ -152,9 +152,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params["loss_coef"] = trial.suggest_float("loss_coef", 1.0, 5.0, log=True)
 
     # --- ÜBERPRÜFT: Parameter des Projection Head ---
-    # Der Suchraum für die Architektur des Projection Head ist generisch und
-    # funktioniert auch mit dem einfacheren Output der Student's T-Verteilung.
-    params["projection_head_layers"] = trial.suggest_int("projection_head_layers", 2, 4)
+    params["projection_head_layers"] = trial.suggest_int("projection_head_layers", 0, 0)
     if params["projection_head_layers"] > 0:
         params["projection_head_dim_factor"] = trial.suggest_categorical("projection_head_dim_factor", [1, 2, 4, 8])
         params["projection_head_dropout"] = trial.suggest_float("projection_head_dropout", 0.0, 0.1)
