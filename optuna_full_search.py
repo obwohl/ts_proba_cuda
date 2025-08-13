@@ -28,8 +28,8 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 logging.getLogger("optuna").setLevel(logging.INFO)
 
 FIXED_PARAMS = {
-    "data_file": "preci_short.csv", 
-    "horizon": 24,
+    "data_file": "eisbach_airtemp96_pressure96.csv", 
+    "horizon": 96,
     "train_ratio_in_tv": 0.8, # NEU: Split-Verhältnis explizit gemacht
     # --- NEU: Wähle die zu optimierende Metrik ---
     # 'cvar': Conditional Value at Risk (Durchschnitt der schlechtesten 5% Fehler) -> robustere Modelle
@@ -39,12 +39,12 @@ FIXED_PARAMS = {
     # Setze auf `None`, um den Durchschnitt über alle Kanäle zu verwenden (Standardverhalten).
     "optimization_target_channel": None,
     "num_epochs":20,
-    "patience": 2,
+    "patience": 3,
     "early_stopping_delta": 1e-4,
-    "debug_gating": True, # NEU: Schalter für detailliertes Gating-Logging
+    "debug_gating": False, # NEU: Schalter für detailliertes Gating-Logging
     
 
-    "distribution_family": "ZIEGPD_M1",
+    "distribution_family": "bgev", # Options: "Johnson", "AutoGPD", "bgev"
     
     "num_workers": 0, # HARDCODED TO 0 TO PREVENT "TOO MANY OPEN FILES" ERROR
     "quantiles": [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99], # <-- HIER ERWEITERN
@@ -80,10 +80,10 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params = {}
     params["seq_len"] = trial.suggest_categorical("seq_len", [96,192, 384, 480])
     params["norm_mode"] = trial.suggest_categorical("norm_mode", ["subtract_median"]) # "subtract_last" deaktiviert
-    params["lr"] = trial.suggest_float("lr", 1e-5, 1e-4, log=True)
+    params["lr"] = trial.suggest_float("lr", 1e-5, 5e-3, log=True)
     params["d_model"] = trial.suggest_categorical("d_model", [128, 256, 512])
     params["d_ff"] = trial.suggest_categorical("d_ff", [128, 256, 512])
-    params["e_layers"] = trial.suggest_int("e_layers", 1, 3)
+    params["e_layers"] = trial.suggest_int("e_layers", 1, 4)
 
     # --- NEU: moving_avg als kategorialer Hyperparameter ---
     # zu bestimmen analytisch-heuristisch per analyze_mutual_information.py
@@ -152,9 +152,9 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
     params["loss_coef"] = trial.suggest_float("loss_coef", 1.0, 5.0, log=True)
 
     # --- ÜBERPRÜFT: Parameter des Projection Head ---
-    params["projection_head_layers"] = trial.suggest_int("projection_head_layers", 0, 0)
+    params["projection_head_layers"] = trial.suggest_int("projection_head_layers", 0, 5)
     if params["projection_head_layers"] > 0:
-        params["projection_head_dim_factor"] = trial.suggest_categorical("projection_head_dim_factor", [1, 2, 4, 8])
+        params["projection_head_dim_factor"] = trial.suggest_categorical("projection_head_dim_factor", [1, 2, 4])
         params["projection_head_dropout"] = trial.suggest_float("projection_head_dropout", 0.0, 0.1)
         params["projection_head_weight_decay"] = trial.suggest_float("projection_head_weight_decay", 1e-6, 1e-2, log=True)
 

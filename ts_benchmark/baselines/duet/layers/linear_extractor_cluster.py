@@ -188,12 +188,18 @@ class Linear_extractor_cluster(nn.Module):
 
     def noisy_top_k_gating(self, x, train, gating_input=None):
         # Use gating_input if provided, otherwise use x
+        print(f"DEBUG: Input x stats: mean={x.mean().item():.6f}, std={x.std().item():.6f}, min={x.min().item():.6f}, max={x.max().item():.6f}")
         if gating_input is None:
+            # Debugging: Check stats of the input to gating_input_projection
+            input_to_gating_proj = x[:, -1, :]
+            print(f"DEBUG: input_to_gating_proj stats: mean={input_to_gating_proj.mean().item():.6f}, std={input_to_gating_proj.std().item():.6f}, min={input_to_gating_proj.min().item():.6f}, max={input_to_gating_proj.max().item():.6f}")
             
-            context_for_gating = self.gating_input_projection(x[:, -1, :])
-            
+            context_for_gating = torch.nan_to_num(self.gating_input_projection(input_to_gating_proj))
+            print(f"DEBUG: context_for_gating stats: mean={context_for_gating.mean().item():.6f}, std={context_for_gating.std().item():.6f}, min={context_for_gating.min().item():.6f}, max={context_for_gating.max().item():.6f}")
         else:
             context_for_gating = gating_input
+
+        
 
         batch_size = context_for_gating.shape[0]
 

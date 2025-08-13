@@ -41,5 +41,5 @@ class MLPProjectionHead(nn.Module):
             x = self.input_layer(x)
             for block in self.residual_blocks:
                 x = block(x)
-            return self.final_layer(x)
-        return self.projection(x)
+            return self.final_layer(x).to(torch.float32)
+        return self.projection(x).to(torch.float32)

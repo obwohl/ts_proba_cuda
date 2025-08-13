@@ -6,8 +6,16 @@ from ts_benchmark.baselines.duet.layers.linear_extractor_cluster import Linear_e
 from ts_benchmark.baselines.duet.utils.masked_attention import Mahalanobis_mask, Encoder, EncoderLayer, FullAttention, AttentionLayer
 from ts_benchmark.baselines.duet.johnson_system import JohnsonOutput
 from ts_benchmark.baselines.duet.gpd_system import ExtendedGPDOutput
+from ts_benchmark.baselines.duet.bgev_distribution import BGEVDistribution
 from ts_benchmark.baselines.duet.layers.common import MLPProjectionHead
 from ts_benchmark.baselines.duet.layers.esn.reservoir_expert import UnivariateReservoirExpert, MultivariateReservoirExpert
+
+class BGEVOutput:
+    def __init__(self, config):
+        self.args_dim = 3
+
+    def distribution(self, params, horizon):
+        return BGEVDistribution(params[..., 0], torch.nn.functional.softplus(params[..., 1]), torch.sigmoid(params[..., 2]))
 
 class DenormalizingDistribution:
     """
@@ -139,8 +147,10 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
         # --- NEW: Probabilistic head selection ---
         if config.distribution_family == "Johnson":
             self.distr_output = JohnsonOutput(config.channel_types)
-        elif config.distribution_family == "ZIEGPD_M1":
+        elif config.distribution_family == "AutoGPD":
             self.distr_output = ExtendedGPDOutput(config.channel_types)
+        elif config.distribution_family == "bgev":
+            self.distr_output = BGEVOutput(config)
         else:
             raise ValueError(f"Unknown distribution_family: {config.distribution_family}")
 
@@ -228,8 +238,19 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
         distr_params = torch.stack(distr_params_list, dim=1)
         distr_params = torch.nan_to_num(distr_params, nan=0.0, posinf=1e4, neginf=-1e4)
 
-        if self.config.distribution_family == "ZIEGPD_M1":
-            # For ZIEGPD, the distribution handles normalization internally.
+        if self.config.distribution_family == "AutoGPD":
+            # --- NEW: Dynamically adjust for non-zero-inflated channels ---
+            is_zi_flags = getattr(self.config, 'is_channel_zero_inflated', None)
+            if is_zi_flags:
+                for i, is_zero_inflated in enumerate(is_zi_flags):
+                    if not is_zero_inflated:
+                        # This channel is not zero-inflated.
+                        # Force the logit of the zero probability ('pi_raw') to a large negative
+                        # number, which will result in pi -> 0 after the sigmoid function.
+                        # The parameter index for pi_raw is 0.
+                        distr_params[:, i, :, 0] = -1e9  # A large negative value
+
+            # For AutoGPD, the distribution handles normalization internally.
             # We pass the stats directly to it.
             base_distr = self.distr_output.distribution(distr_params, self.horizon, stats=stats)
             final_distr = base_distr

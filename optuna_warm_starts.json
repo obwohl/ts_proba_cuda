@@ -1,37 +1,5 @@
 [
     {
-        "seq_len": 480,
-        "norm_mode": "subtract_median",
-        "lr": 0.00097856760515846,
-        "d_model": 256,
-        "d_ff": 128,
-        "e_layers": 3,
-        "moving_avg": 24,
-        "n_heads": 8,
-        "dropout": 0.08425311807814735,
-        "fc_dropout": 0.0785595663768045,
-        "batch_size": 256,
-        "use_agc": false,
-        "num_linear_experts": 2,
-        "num_univariate_esn_experts": 2,
-        "num_multivariate_esn_experts": 1,
-        "hidden_size": 256,
-        "reservoir_size_uni": 256,
-        "spectral_radius_uni": 1.0570736801194176,
-        "sparsity_uni": 0.4235481100835371,
-        "leak_rate_uni": 0.6755794457339768,
-        "input_scaling_uni": 0.8033190065837147,
-        "esn_uni_weight_decay": 7.979497113298848e-06,
-        "reservoir_size_multi": 128,
-        "spectral_radius_multi": 1.0578092120627796,
-        "sparsity_multi": 0.03306627942301003,
-        "leak_rate_multi": 0.2947346090943995,
-        "input_scaling_multi": 0.028101575615029902,
-        "esn_multi_weight_decay": 6.327133663041211e-06,
-        "noise_epsilon": 0.002375061819313699,
-        "loss_coef": 1.7234706133258508,
-        "projection_head_layers": 0,
-        "loss_target_clip": null,
-        "use_channel_adjacency_prior": false
+        
     }
 ]

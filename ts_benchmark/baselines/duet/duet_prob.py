@@ -26,6 +26,7 @@ from ts_benchmark.baselines.utils import forecasting_data_provider, train_val_sp
 from ts_benchmark.baselines.duet.utils.window_search import find_interesting_windows
 from ts_benchmark.baselines.duet.layers.esn.reservoir_expert import UnivariateReservoirExpert, MultivariateReservoirExpert
 from ts_benchmark.baselines.duet.johnson_system import get_best_johnson_fit
+from ts_benchmark.utils.statistical_tests import is_significantly_zero_inflated
 from ...models.model_base import ModelBase
 
 def _get_tensor_signature(tensor: torch.Tensor) -> str:
@@ -310,11 +311,23 @@ class DUETProb(ModelBase):
                 print(f"  -> Channel '{col_name}': Best fit is Johnson {best_fit}")
             setattr(self.config, 'channel_types', channel_types)
             print("--- Johnson system analysis complete. ---\n")
-        elif self.config.distribution_family == "ZIEGPD_M1":
-            print("--- Using ZIEGPD_M1 distribution family for all channels. ---")
+        elif self.config.distribution_family == "AutoGPD":
+            print("--- Analyzing data for Zero-Inflation for each channel... ---")
+            is_zero_inflated_list = []
+            for col_name in train_data_for_fit.columns:
+                # verbose=False, da wir die Ausgabe selbst steuern
+                is_zi = is_significantly_zero_inflated(train_data_for_fit[col_name], verbose=False)
+                is_zero_inflated_list.append(is_zi)
+                print(f"  -> Channel '{col_name}': Is Zero-Inflated? {is_zi}")
+            
+            setattr(self.config, 'is_channel_zero_inflated', is_zero_inflated_list)
+            
+            # Set channel_types for compatibility, although the main logic will use the new flag
             channel_types = ["ZIEGPD_M1"] * column_num
             setattr(self.config, 'channel_types', channel_types)
-            print("--- ZIEGPD_M1 setup complete. ---\n")
+            print("--- Zero-Inflation analysis complete. ---\n")
+        elif self.config.distribution_family == "bgev":
+            print("--- Using bGEV distribution. No specific pre-analysis required. ---")
         else:
             raise ValueError(f"Unknown distribution_family: {self.config.distribution_family}")
 
@@ -583,6 +596,12 @@ class DUETProb(ModelBase):
                 sum_gate_weights_multi_esn = torch.zeros(config.num_multivariate_esn_experts, device=device) if config.num_multivariate_esn_experts > 0 else None
                 sum_selection_counts = torch.zeros(total_experts, device=device) if total_experts > 0 else None
                 
+                # Initialize avg_gate_weights and avg_selection_counts to None
+                avg_gate_weights_linear = None
+                avg_gate_weights_uni_esn = None
+                avg_gate_weights_multi_esn = None
+                avg_selection_counts = None
+                
                 expert_metrics_batch_count = 0
                 
                 n_vars = self.config.c_out
@@ -644,10 +663,17 @@ class DUETProb(ModelBase):
                             if config.use_agc:
                                 adaptive_clip_grad_(self.model.parameters(), clip_factor=config.agc_lambda)
                             else:
-                                torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=1.0)
+                                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
                             optimizer.step()
                             optimizer.zero_grad()
+
+                            # Check for NaNs/Infs in model parameters after update
+                            for name, param in self.model.named_parameters():
+                                if param.grad is not None:
+                                    if torch.isnan(param).any() or torch.isinf(param).any():
+                                        tqdm.write(f"  -> ☠️ PRUNING: NaN/Inf detected in parameter {name} after optimizer step. Value: {param.data}")
+                                        raise optuna.exceptions.TrialPruned(f"NaN/Inf detected in parameter {name}.")
                             
                         epoch_total_losses.append(total_loss.item())
                         epoch_importance_losses.append(loss_importance.item())
@@ -881,7 +907,7 @@ class DUETProb(ModelBase):
                 print("No checkpoint was saved during training.")
             writer.close()
 
-        return self
+        return self, config.log_dir
 
     def _log_epoch_summary_to_file(self, metrics: Dict[str, Any]):
         """Schreibt eine formatierte Zusammenfassung der Epochen-Metriken in eine Log-Datei."""

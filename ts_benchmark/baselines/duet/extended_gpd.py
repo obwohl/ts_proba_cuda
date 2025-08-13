@@ -45,40 +45,46 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
     
     # --- Hilfsfunktionen für GPD F(z) und W(u) ---
     def _gpd_cdf(self, z, sigma, xi):
-        # Handle z < 0 or (1 + xi*z/sigma) <= 0 cases explicitly for F(z) = 0
-        safe_z = torch.max(z, torch.tensor(0.0, device=z.device, dtype=z.dtype))
-        
-        # Calculate term (1 + xi*safe_z/sigma)
-        arg_power = 1 + xi * safe_z / sigma
-        
-        # Clamp arg_power to be positive to avoid NaN/Inf for power/log
-        # For xi < 0, arg_power could become <=0.
-        arg_power = torch.clamp(arg_power, min=1e-6) 
+        # Support is z >= 0, and if xi < 0, then 1 + xi * z / sigma > 0 => z <= -sigma / xi
+        support_mask = (z >= 0) & ((xi >= 0) | (z <= -sigma / xi))
 
-        # xi = 0 case (Exponential)
-        exp_case = 1 - torch.exp(-safe_z / sigma)
-        
-        # xi != 0 case (GPD)
-        gpd_case = 1 - arg_power.pow(-1/xi)
-        
-        # Combine cases based on xi
-        # Using a small epsilon for xi to treat very small xi as 0
-        return torch.where(torch.abs(xi) < 1e-9, exp_case, gpd_case)
+        # Initialize cdf. Values outside lower bound support are 0.
+        cdf = torch.zeros_like(z)
+
+        # For values within the support, calculate the CDF
+        if support_mask.any():
+            z_sup, sigma_sup, xi_sup = z[support_mask], sigma[support_mask], xi[support_mask]
+
+            arg_power = 1 + xi_sup * z_sup / sigma_sup
+            
+            exp_case = 1 - torch.exp(-z_sup / sigma_sup)
+            gpd_case = 1 - arg_power.pow(-1 / xi_sup)
+            
+            cdf[support_mask] = torch.where(torch.abs(xi_sup) < 1e-9, exp_case, gpd_case)
+
+        # For values outside the support upper bound, CDF is 1.
+        cdf[(z > 0) & ~support_mask] = 1.0
+        return cdf
 
     def _gpd_pdf(self, z, sigma, xi):
-        # For the derivative (pdf), also handle z < 0 or (1 + xi*z/sigma) <= 0 cases explicitly
-        safe_z = torch.max(z, torch.tensor(0.0, device=z.device, dtype=z.dtype))
+        # Support is z >= 0, and if xi < 0, then 1 + xi * z / sigma > 0 => z <= -sigma / xi
+        support_mask = (z >= 0) & ((xi >= 0) | (z <= -sigma / xi))
 
-        arg_power = 1 + xi * safe_z / sigma
-        arg_power = torch.clamp(arg_power, min=1e-6)
+        # Initialize pdf with 0 for values outside support
+        pdf = torch.zeros_like(z)
 
-        # xi = 0 case (Exponential PDF)
-        exp_pdf_case = (1/sigma) * torch.exp(-safe_z / sigma)
+        # For values within the support, calculate the PDF
+        if support_mask.any():
+            z_sup, sigma_sup, xi_sup = z[support_mask], sigma[support_mask], xi[support_mask]
 
-        # xi != 0 case (GPD PDF = d/dz F(z))
-        gpd_pdf_case = (1/sigma) * arg_power.pow(-1/xi - 1)
-        
-        return torch.where(torch.abs(xi) < 1e-9, exp_pdf_case, gpd_pdf_case)
+            arg_power = 1 + xi_sup * z_sup / sigma_sup
+
+            exp_pdf_case = (1 / sigma_sup) * torch.exp(-z_sup / sigma_sup)
+            gpd_pdf_case = (1 / sigma_sup) * arg_power.pow(-1 / xi_sup - 1)
+            
+            pdf[support_mask] = torch.where(torch.abs(xi_sup) < 1e-9, exp_pdf_case, gpd_pdf_case)
+
+        return pdf
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
         # value comes in as [B, H, N_vars], but params are [B, N_vars, H]. Let's align them.
@@ -90,57 +96,74 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
         kappa, sigma, xi = self.kappa, self.sigma, self.xi
 
         # This method now receives UNNORMALIZED values.
-        # The check for zeros must happen on the raw data.
         log_probs = torch.zeros_like(value, dtype=value.dtype, device=value.device)
 
-        # Case 1: value is zero or extremely close to it (zero-inflated part)
-        # Using a tolerance to handle floating point inaccuracies.
+        # --- MASK DEFINITIONS ---
         zero_mask = torch.abs(value) < 1e-9
-        if self.pi.dim() > 0:
-            log_probs[zero_mask] = torch.log(self.pi[zero_mask])
-        elif zero_mask.all():
-            log_probs = torch.log(self.pi)
-
-        # Case 2: value > 0 (Extended GPD part)
-        # The positive mask must exclude the values already handled by the zero mask.
         positive_mask = (value > 0) & (~zero_mask)
+
+        # --- HANDLE ZERO VALUES ---
+        if torch.any(zero_mask):
+            # Default behavior for ZI channels: log(pi)
+            log_probs_for_zeros = torch.log(self.pi)
+
+            # Identify non-ZI channels (where pi was forced to be near-zero)
+            non_zi_mask = self.pi < 2e-6
+
+            # Create a combined mask for channels that are non-ZI AND have zero values
+            non_zi_zero_mask = non_zi_mask & zero_mask
+
+            if torch.any(non_zi_zero_mask):
+                # For these specific points, calculate log_prob using the CDF heuristic to avoid log(0).
+                
+                # Denormalization stats for the target elements
+                mean_expanded = self._mean.expand_as(value)[non_zi_zero_mask]
+                std_expanded = self._std.expand_as(value)[non_zi_zero_mask]
+                
+                # Parameters for the target elements
+                sigma_masked = sigma[non_zi_zero_mask]
+                xi_masked = xi[non_zi_zero_mask]
+
+                # Heuristic: P(X=0) ~= P(0 < X_norm < epsilon_norm) = CDF(epsilon_norm)
+                epsilon = 1e-7
+                epsilon_norm = (epsilon - mean_expanded) / std_expanded
+                
+                # The log_prob is log(CDF(epsilon_norm)).
+                # This corresponds to the log-likelihood of the underlying continuous GPD for values near zero.
+                log_prob_non_zi_zero = torch.log(torch.clamp(self._gpd_cdf(epsilon_norm, sigma_masked, xi_masked), min=1e-9))
+                
+                # Update the log_probs tensor only at the required locations
+                log_probs_for_zeros[non_zi_zero_mask] = log_prob_non_zi_zero
+
+            log_probs[zero_mask] = log_probs_for_zeros[zero_mask]
+
+        # --- HANDLE POSITIVE VALUES ---
+        # This part is correct for both ZI and non-ZI cases.
+        # For non-ZI, pi is ~0, so log(1-pi) is ~0, and the term vanishes as required.
         if torch.any(positive_mask):
             v_pos = value[positive_mask]
 
-            # --- Internal Normalization for the GPD component ---
-            # Reshape mean and std to match the shape of v_pos
-            # self._mean/std have shape [B, N_vars, 1]. We need to align them with `positive_mask`.
+            # Internal Normalization
             mean_expanded = self._mean.expand_as(value)[positive_mask]
             std_expanded = self._std.expand_as(value)[positive_mask]
             v_pos_norm = (v_pos - mean_expanded) / std_expanded
-            # --- End Internal Normalization ---
 
-            if kappa.dim() > 0:
-                k_pos = kappa[positive_mask]
-                s_pos = sigma[positive_mask]
-                x_pos = xi[positive_mask]
-                pi_pos = self.pi[positive_mask]
-            else:
-                k_pos = kappa
-                s_pos = sigma
-                x_pos = xi
-                pi_pos = self.pi
+            # Parameters for the positive values
+            k_pos, s_pos, x_pos, pi_pos = kappa[positive_mask], sigma[positive_mask], xi[positive_mask], self.pi[positive_mask]
 
-            # Calculate F(z) and f(z) for the base GPD on NORMALIZED data
+            # Base GPD calculations
             gpd_cdf_val = self._gpd_cdf(v_pos_norm, s_pos, x_pos)
             gpd_pdf_val = self._gpd_pdf(v_pos_norm, s_pos, x_pos)
 
-            # Clamp values for numerical stability before log
+            # Clamp for numerical stability
             gpd_cdf_val = torch.clamp(gpd_cdf_val, min=1e-9, max=1-1e-9)
             gpd_pdf_val = torch.clamp(gpd_pdf_val, min=1e-9)
             
-            # Calculate the log-probability using the correct formula
+            # Log-probability calculation
             log_one_minus_pi = torch.log(1 - pi_pos)
             log_kappa = torch.log(k_pos)
             log_gpd_cdf = torch.log(gpd_cdf_val)
             log_gpd_pdf = torch.log(gpd_pdf_val)
-
-            # Jacobian correction for the normalization transformation (log(1/std))
             log_det_jacobian = -torch.log(std_expanded)
 
             log_probs[positive_mask] = (
@@ -151,7 +174,7 @@ class ZeroInflatedExtendedGPD_M1_Continuous(Distribution):
                 log_det_jacobian
             )
 
-        # Handle values outside support (value < 0)
+        # Handle values outside support
         log_probs[value < 0] = -float('inf')
 
         return log_probs
