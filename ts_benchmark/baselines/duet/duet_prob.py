@@ -116,6 +116,7 @@ class TransformerConfig:
             # --- NEW: ESN Readout Regularization ---
             "esn_uni_weight_decay": 0.0,
             "esn_multi_weight_decay": 0.0,
+            "noise_epsilon": 0.01,
             
             # --- Training / Optimization ---
             "lr": 1e-4,
@@ -150,6 +151,8 @@ class TransformerConfig:
             "tqdm_update_freq": 10,
             "tqdm_min_interval": 1.0,
             "debug_max_batches": None, # NEW: Limit number of batches for debugging
+            "cvar_alpha": 0.2, # Add cvar_alpha
+            "optimization_metric": "nll",
         }
 
         for key, value in defaults.items():
@@ -643,11 +646,6 @@ class DUETProb(ModelBase):
                         
                         denorm_distr, base_distr, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, batch_selection_counts, p_learned, p_final, clean_logits, noisy_logits, distr_params = self.model(input_data)
                         
-                        print(f"DEBUG: Batch {i} - Input x stats: mean={input_data.mean():.6f}, std={input_data.std():.6f}, min={input_data.min():.6f}, max={input_data.max():.6f}")
-                        print(f"DEBUG: Batch {i} - Target y stats: mean={target.mean():.6f}, std={target.std():.6f}, min={target.min():.6f}, max={target.max():.6f}")
-                        print(f"DEBUG: Batch {i} - Denorm Distr mean stats: mean={denorm_distr.mean.mean():.6f}, std={denorm_distr.mean.std():.6f}")
-                        print(f"DEBUG: Batch {i} - Loss Importance: {loss_importance.item():.6f}")
-
                         target_horizon = target[:, -config.horizon:, :]
 
                         if self.config.distribution_family == "Johnson":

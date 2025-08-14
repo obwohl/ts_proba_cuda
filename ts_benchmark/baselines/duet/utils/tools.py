@@ -122,10 +122,10 @@ class EarlyStopping:
             if checkpoint_dir:
                 os.makedirs(checkpoint_dir, exist_ok=True)
 
-            absolute_path = os.path.abspath(self.path)
-            print(f"---&gt; Attempting to save model to: {absolute_path}")
+            # absolute_path = os.path.abspath(self.path)
+            # print(f"---&gt; Attempting to save model to: {absolute_path}")
             torch.save(model_state, self.path)
-            print(f"---&gt; Model successfully saved.")
+            # print(f"---&gt; Model saving is disabled for debugging.")
             self.val_loss_min = val_loss
         except Exception as e:
             print(f"!!!!!! FAILED TO SAVE MODEL to path: {self.path} !!!!!!")

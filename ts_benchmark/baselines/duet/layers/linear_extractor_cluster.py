@@ -188,14 +188,11 @@ class Linear_extractor_cluster(nn.Module):
 
     def noisy_top_k_gating(self, x, train, gating_input=None):
         # Use gating_input if provided, otherwise use x
-        print(f"DEBUG: Input x stats: mean={x.mean().item():.6f}, std={x.std().item():.6f}, min={x.min().item():.6f}, max={x.max().item():.6f}")
         if gating_input is None:
             # Debugging: Check stats of the input to gating_input_projection
             input_to_gating_proj = x[:, -1, :]
-            print(f"DEBUG: input_to_gating_proj stats: mean={input_to_gating_proj.mean().item():.6f}, std={input_to_gating_proj.std().item():.6f}, min={input_to_gating_proj.min().item():.6f}, max={input_to_gating_proj.max().item():.6f}")
             
             context_for_gating = torch.nan_to_num(self.gating_input_projection(input_to_gating_proj))
-            print(f"DEBUG: context_for_gating stats: mean={context_for_gating.mean().item():.6f}, std={context_for_gating.std().item():.6f}, min={context_for_gating.min().item():.6f}, max={context_for_gating.max().item():.6f}")
         else:
             context_for_gating = gating_input
 
@@ -234,21 +231,17 @@ class Linear_extractor_cluster(nn.Module):
            
 
             raw_noise_logits = self.noise(input_for_gating_flat)
-            print(f"DEBUG: raw_noise_logits stats: mean={raw_noise_logits.mean().item():.6f}, std={raw_noise_logits.std().item():.6f}, min={raw_noise_logits.min().item():.6f}, max={raw_noise_logits.max().item():.6f}")
 
 
             raw_noise_logits = torch.nan_to_num(raw_noise_logits)
 
 
             noise_stddev_flat = torch.clamp(self.softplus(raw_noise_logits), min=1e-6) + self.config.noise_epsilon
-            print(f"DEBUG: noise_stddev_flat stats: mean={noise_stddev_flat.mean().item():.6f}, std={noise_stddev_flat.std().item():.6f}, min={noise_stddev_flat.min().item():.6f}, max={noise_stddev_flat.max().item():.6f}")
 
 
             random_noise = torch.randn_like(clean_logits_flat)
-            print(f"DEBUG: random_noise stats: mean={random_noise.mean().item():.6f}, std={random_noise.std().item():.6f}, min={random_noise.min().item():.6f}, max={random_noise.max().item():.6f}")
 
             noisy_logits_flat = clean_logits_flat + (random_noise * noise_stddev_flat)
-            print(f"DEBUG: noisy_logits_flat stats: mean={noisy_logits_flat.mean().item():.6f}, std={noisy_logits_flat.std().item():.6f}, min={noisy_logits_flat.min().item():.6f}, max={noisy_logits_flat.max().item():.6f}")
         else:
             noisy_logits_flat = clean_logits_flat
 

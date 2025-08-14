@@ -29,12 +29,16 @@ class MLPProjectionHead(nn.Module):
         self.num_layers = num_layers
         if self.num_layers == 0:
             self.projection = nn.Linear(in_features, out_features)
+            nn.init.normal_(self.projection.weight, std=0.001)
+            nn.init.zeros_(self.projection.bias)
         else:
             self.input_layer = nn.Linear(in_features, in_features)
             self.residual_blocks = nn.ModuleList(
                 [ProjectionResidualBlock(d_model=in_features, hidden_dim=hidden_dim, dropout=dropout) for _ in range(num_layers)]
             )
             self.final_layer = nn.Linear(in_features, out_features)
+            nn.init.normal_(self.final_layer.weight, std=0.001)
+            nn.init.zeros_(self.final_layer.bias)
             
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.num_layers > 0:

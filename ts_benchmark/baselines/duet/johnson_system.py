@@ -56,6 +56,7 @@ class JohnsonSB_torch(Distribution):
         
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
         lower, upper = self.xi, self.xi + self.lambda_
+
         # Clamp value to be strictly within the support to avoid log(0)
         value_safe = torch.clamp(value, lower + 1e-9, upper - 1e-9)
         
@@ -65,7 +66,9 @@ class JohnsonSB_torch(Distribution):
         log_p = self._log_delta - self._log_lambda - self._log_sqrt_2pi - 0.5 * z.pow(2) - y.log() - (1 - y).log()
         
         # Ensure that any original values outside the support get -inf probability
-        log_p = torch.where((value > lower) & (value < upper), log_p, torch.full_like(log_p, -float('inf')))
+        is_outside = (value <= lower) | (value >= upper)
+
+        log_p = torch.where(~is_outside, log_p, torch.full_like(log_p, -float('inf')))
         return log_p
 
 # --- SCIPY WRAPPERS (ONLY FOR NON-CRITICAL ICDF FUNCTION) ---
@@ -334,12 +337,23 @@ class JohnsonOutput:
 
         gamma = gamma_raw.squeeze(-1)
         delta = F.softplus(delta_raw.squeeze(-1)) + 1e-6
+
         xi = xi_raw.squeeze(-1)
         lambda_ = F.softplus(lambda_raw.squeeze(-1)) + 1e-6
 
+        # Apply constraints for SB channels
+        xi_clone = xi.clone()
+        lambda_clone = lambda_.clone()
+        for i, channel_type in enumerate(self.channel_types):
+            if channel_type == 'SB':
+                # This ensures xi is around -2, and lambda is around 4, for a support of (-2, 2)
+                # which is reasonable for normalized data.
+                xi_clone[:, i, :] = -F.softplus(xi[:, i, :]) - 2.0
+                lambda_clone[:, i, :] = F.softplus(lambda_[:, i, :]) + 4.0
+
         return CombinedJohnsonDistribution(
-            channel_types=self.channel_types, # FIX: Pass self.channel_types
-            gamma=gamma, delta=delta, xi=xi, lambda_=lambda_
+            channel_types=self.channel_types,
+            gamma=gamma, delta=delta, xi=xi_clone, lambda_=lambda_clone
         )
 
 class CombinedJohnsonDistribution(Distribution):
@@ -405,6 +419,10 @@ class CombinedJohnsonDistribution(Distribution):
             log_p[:, indices, :] = dist.log_prob(value[:, indices, :])
             
         return log_p
+
+    @property
+    def stddev(self):
+        return torch.ones_like(self.gamma)
 
     def icdf(self, q: torch.Tensor) -> torch.Tensor:
         quantiles = torch.zeros(self.batch_shape + (len(q),), device=q.device)
