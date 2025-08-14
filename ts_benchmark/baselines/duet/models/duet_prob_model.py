@@ -192,10 +192,11 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
     def forward(self, input_x: torch.Tensor):
         # input_x: [Batch, SeqLen, NVars]
 
+        print(f"DEBUG: DUETProbModel.forward - Input_x stats (before RevIN): mean={input_x.mean():.6f}, std={input_x.std():.6f}, min={input_x.min():.6f}, max={input_x.max():.6f}")
         x_for_main_model, stats = self.cluster.revin(input_x, 'norm')
 
         x_for_main_model = torch.nan_to_num(x_for_main_model)
-        # print(f"DEBUG: x_for_main_model | Shape: {x_for_main_model.shape} | Mean: {x_for_main_model.mean():.4f} | Std: {x_for_main_model.std():.4f} | Min: {x_for_main_model.min():.4f} | Max: {x_for_main_model.max():.4f}")
+        print(f"DEBUG: DUETProbModel.forward - x_for_main_model stats (after RevIN): mean={x_for_main_model.mean():.6f}, std={x_for_main_model.std():.6f}, min={x_for_main_model.min():.6f}, max={x_for_main_model.max():.6f}")
 
         temporal_feature, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, clean_logits, noisy_logits = self.cluster(x_for_main_model)
         # print(f"DEBUG: temporal_feature | Shape: {temporal_feature.shape} | Mean: {temporal_feature.mean():.4f} | Std: {temporal_feature.std():.4f} | Min: {temporal_feature.min():.4f} | Max: {temporal_feature.max():.4f}")

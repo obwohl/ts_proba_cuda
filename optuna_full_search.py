@@ -38,10 +38,10 @@ FIXED_PARAMS = {
     # Setze hier einen Kanalnamen (z.B. "wassertemp"), um den Validierungs-Loss nur für diesen Kanal zu berechnen.
     # Setze auf `None`, um den Durchschnitt über alle Kanäle zu verwenden (Standardverhalten).
     "optimization_target_channel": None,
-    "num_epochs":20,
+    "num_epochs":1,
     "patience": 3,
     "early_stopping_delta": 1e-4,
-    "debug_gating": False, # NEU: Schalter für detailliertes Gating-Logging
+    "debug_gating": True, # NEU: Schalter für detailliertes Gating-Logging
     
 
     "distribution_family": "bgev", # Options: "Johnson", "AutoGPD", "bgev"
@@ -167,7 +167,7 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
 
     return params
 
-def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
+def objective(trial: optuna.Trial, data: pd.DataFrame, study_name: str) -> float:
     """Führt einen Trainingslauf durch und gibt die beiden Zielmetriken (avg_crps, cvar_crps) zurück."""
     trial_num = trial.number
     print(f"\n\n{'='*20} STARTING TRIAL #{trial_num} {'='*20}")
@@ -179,11 +179,12 @@ def objective(trial: optuna.Trial, data: pd.DataFrame) -> float:
     for key, value in model_hyper_params.items():
         print(f"  - {key}: {value}")
 
-    save_dir = f"results/optuna_heuristic/{STUDY_NAME}/trial_{trial_num}"
+    save_dir = f"results/optuna_heuristic/{study_name}/trial_{trial_num}"
     os.makedirs(save_dir, exist_ok=True)
     model_hyper_params['log_dir'] = save_dir
-    model_hyper_params['study_name'] = STUDY_NAME
+    model_hyper_params['study_name'] = study_name
     model_hyper_params['trial_num'] = trial_num
+
 
     model = None # Ensure model is defined in the outer scope for the finally block
     try:
@@ -298,9 +299,9 @@ def setup_logging(study_name: str):
     )
 
     # Leite stdout und stderr in die Log-Datei um, um auch print() und Fehler abzufangen
-    sys.stdout = open(log_file_path, 'a')
-    sys.stderr = open(log_file_path, 'a')
-    print(f"Logging for PID {pid} is set up to write to {log_file_path}")
+    # sys.stdout = open(log_file_path, 'a')
+    # sys.stderr = open(log_file_path, 'a')
+    # print(f"Logging for PID {pid} is set up to write to {log_file_path}")
     
 if __name__ == "__main__":
     import argparse

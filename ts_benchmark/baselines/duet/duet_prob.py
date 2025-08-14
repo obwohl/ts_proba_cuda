@@ -149,6 +149,7 @@ class TransformerConfig:
             "profile_epoch": None,
             "tqdm_update_freq": 10,
             "tqdm_min_interval": 1.0,
+            "debug_max_batches": None, # NEW: Limit number of batches for debugging
         }
 
         for key, value in defaults.items():
@@ -494,7 +495,7 @@ class DUETProb(ModelBase):
         
         self._build_model()
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+        device = torch.device("cpu")
         self.model.to(device)
 
         print(f"--- Model Analysis ---Total trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
@@ -630,7 +631,11 @@ class DUETProb(ModelBase):
                     with_stack=True,
                     profile_memory=True
                 ) if config.profile_epoch == epoch else contextlib.nullcontext() as prof:
+                    debug_max_batches = getattr(config, 'debug_max_batches', None)
                     for i, batch in enumerate(epoch_loop):
+                        if debug_max_batches is not None and i >= debug_max_batches:
+                            tqdm.write(f"DEBUG: Stopping epoch after {debug_max_batches} batches.")
+                            break
                         global_step += 1
                         input_data, target, _, _ = batch
                         input_data = input_data.to(device)
@@ -638,6 +643,11 @@ class DUETProb(ModelBase):
                         
                         denorm_distr, base_distr, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, batch_selection_counts, p_learned, p_final, clean_logits, noisy_logits, distr_params = self.model(input_data)
                         
+                        print(f"DEBUG: Batch {i} - Input x stats: mean={input_data.mean():.6f}, std={input_data.std():.6f}, min={input_data.min():.6f}, max={input_data.max():.6f}")
+                        print(f"DEBUG: Batch {i} - Target y stats: mean={target.mean():.6f}, std={target.std():.6f}, min={target.min():.6f}, max={target.max():.6f}")
+                        print(f"DEBUG: Batch {i} - Denorm Distr mean stats: mean={denorm_distr.mean.mean():.6f}, std={denorm_distr.mean.std():.6f}")
+                        print(f"DEBUG: Batch {i} - Loss Importance: {loss_importance.item():.6f}")
+
                         target_horizon = target[:, -config.horizon:, :]
 
                         if self.config.distribution_family == "Johnson":
@@ -652,6 +662,14 @@ class DUETProb(ModelBase):
 
                         total_loss = nll_loss + config.loss_coef * loss_importance
 
+                        # --- ADD NaN/Inf checks here ---
+                        if torch.isnan(nll_loss).any() or torch.isinf(nll_loss).any():
+                            tqdm.write(f"  -> ☠️ PRUNING: NaN/Inf detected in nll_loss. Value: {nll_loss.item()}")
+                            raise optuna.exceptions.TrialPruned(f"NaN/Inf detected in nll_loss.")
+                        if torch.isnan(total_loss).any() or torch.isinf(total_loss).any():
+                            tqdm.write(f"  -> ☠️ PRUNING: NaN/Inf detected in total_loss. Value: {total_loss.item()}")
+                            raise optuna.exceptions.TrialPruned(f"NaN/Inf detected in total_loss.")
+
                         with torch.no_grad():
                             denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
                             epoch_denorm_losses_per_channel.append(denorm_loss_per_sample.cpu().numpy())
@@ -660,6 +678,22 @@ class DUETProb(ModelBase):
                         scaled_loss.backward()
 
                         if (i + 1) % accumulation_steps == 0:
+                            # Check gradients for NaNs/Infs before optimizer step
+                            for name, param in self.model.named_parameters():
+                                if param.grad is not None:
+                                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                                        tqdm.write(f"  -> ☠️ PRUNING: NaN/Inf detected in gradient of parameter {name}. Value: {param.grad.data}")
+                                        raise optuna.exceptions.TrialPruned(f"NaN/Inf detected in gradient of parameter {name}.")
+
+                            # Debug prints for gamma and beta gradients
+                            model_ref = self.model.module if hasattr(self.model, 'module') else self.model
+                            if hasattr(model_ref.cluster.revin, 'gamma') and model_ref.cluster.revin.gamma.grad is not None:
+                                gamma_grad = model_ref.cluster.revin.gamma.grad
+                                tqdm.write(f"DEBUG: gamma.grad stats (before opt.step): mean={gamma_grad.mean():.6f}, std={gamma_grad.std():.6f}, min={gamma_grad.min():.6f}, max={gamma_grad.max():.6f}")
+                            if hasattr(model_ref.cluster.revin, 'beta') and model_ref.cluster.revin.beta.grad is not None:
+                                beta_grad = model_ref.cluster.revin.beta.grad
+                                tqdm.write(f"DEBUG: beta.grad stats (before opt.step): mean={beta_grad.mean():.6f}, std={beta_grad.std():.6f}, min={beta_grad.min():.6f}, max={beta_grad.max():.6f}")
+
                             if config.use_agc:
                                 adaptive_clip_grad_(self.model.parameters(), clip_factor=config.agc_lambda)
                             else:

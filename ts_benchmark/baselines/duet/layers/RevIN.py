@@ -67,6 +67,7 @@ class RevIN(nn.Module):
 
     def _get_statistics(self, x):
         """Calculates and stores the statistics for normalization."""
+        print(f"DEBUG: RevIN._get_statistics - Input x stats: mean={x.mean():.6f}, std={x.std():.6f}, min={x.min():.6f}, max={x.max():.6f}")
         if self.norm_mode == 'identity':
             # For identity, location is 0 and scale is 1.
             self.location_stat = torch.zeros(x.shape[0], 1, x.shape[2], device=x.device, dtype=x.dtype)
@@ -110,18 +111,29 @@ class RevIN(nn.Module):
 
             self.scale_stat = scale_stats_per_channel.permute(0, 2, 1).detach() # Reshape back to [Batch, 1, NumFeatures]
 
+        print(f"DEBUG: RevIN._get_statistics - location_stat stats: mean={self.location_stat.mean():.6f}, std={self.location_stat.std():.6f}, min={self.location_stat.min():.6f}, max={self.location_stat.max():.6f}")
+        print(f"DEBUG: RevIN._get_statistics - scale_stat stats: mean={self.scale_stat.mean():.6f}, std={self.scale_stat.std():.6f}, min={self.scale_stat.min():.6f}, max={self.scale_stat.max():.6f}")
+
     
             
     def _normalize(self, x):
         """Applies the normalization."""
+        print(f"DEBUG: RevIN._normalize - Input x (to normalize) stats: mean={x.mean():.6f}, std={x.std():.6f}, min={x.min():.6f}, max={x.max():.6f}")
+        print(f"DEBUG: RevIN._normalize - location_stat (used for norm) stats: mean={self.location_stat.mean():.6f}, std={self.location_stat.std():.6f}, min={self.location_stat.min():.6f}, max={self.location_stat.max():.6f}")
+        print(f"DEBUG: RevIN._normalize - scale_stat (used for norm) stats: mean={self.scale_stat.mean():.6f}, std={self.scale_stat.std():.6f}, min={self.scale_stat.min():.6f}, max={self.scale_stat.max():.6f}")
+
         x_norm = (x - self.location_stat) / self.scale_stat
 
-    
+        print(f"DEBUG: RevIN._normalize - x_norm (after division) stats: mean={x_norm.mean():.6f}, std={x_norm.std():.6f}, min={x_norm.min():.6f}, max={x_norm.max():.6f}")
 
         if self.affine:
-         
+            print(f"DEBUG: RevIN._normalize - gamma (before affine) stats: mean={self.gamma.mean():.6f}, std={self.gamma.std():.6f}, min={self.gamma.min():.6f}, max={self.gamma.max():.6f}")
+            print(f"DEBUG: RevIN._normalize - beta (before affine) stats: mean={self.beta.mean():.6f}, std={self.beta.std():.6f}, min={self.beta.min():.6f}, max={self.beta.max():.6f}")
             
             x_norm = x_norm * self.gamma + self.beta
+
+            print(f"DEBUG: RevIN._normalize - gamma (after affine) stats: mean={self.gamma.mean():.6f}, std={self.gamma.std():.6f}, min={self.gamma.min():.6f}, max={self.gamma.max():.6f}")
+            print(f"DEBUG: RevIN._normalize - beta (after affine) stats: mean={self.beta.mean():.6f}, std={self.beta.std():.6f}, min={self.beta.min():.6f}, max={self.beta.max():.6f}")
            
         return x_norm
 
