@@ -119,7 +119,7 @@ class Linear_extractor_cluster(nn.Module):
         self.softmax = nn.Softmax(1)
         self.register_buffer("mean", torch.tensor([0.0]))
         self.register_buffer("std", torch.tensor([1.0]))
-        self.revin = RevIN(config.enc_in, affine=True) # Initialize RevIN
+        self.revin = RevIN(config.enc_in, affine=True, norm_mode=config.norm_mode) # Initialize RevIN with correct norm_mode
         # Stelle sicher, dass k nicht größer als die Anzahl der Experten ist.
         if self.num_experts > 0:
             self.k = min(self.k, self.num_experts)
@@ -129,6 +129,13 @@ class Linear_extractor_cluster(nn.Module):
         # Projection layer for gating input if it's not explicitly provided
         # Assumes gating decision is based on the last time step's features
         self.gating_input_projection = nn.Linear(config.enc_in, config.d_model)
+        # Explicitly re-initialize weights and bias to ensure they are not zero
+        nn.init.kaiming_uniform_(self.gating_input_projection.weight, nonlinearity='relu')
+        if self.gating_input_projection.bias is not None:
+            nn.init.zeros_(self.gating_input_projection.bias)
+
+        # print(f"DEBUG: After explicit re-init - gating_input_projection.weight stats: mean={self.gating_input_projection.weight.mean().item():.6f}, std={self.gating_input_projection.weight.std().item():.6f}, min={self.gating_input_projection.weight.min().item():.6f}, max={self.gating_input_projection.weight.max().item():.6f}")
+        # print(f"DEBUG: After explicit re-init - gating_input_projection.bias stats: mean={self.gating_input_projection.bias.mean().item():.6f}, std={self.gating_input_projection.bias.std().item():.6f}, min={self.gating_input_projection.bias.min().item():.6f}, max={self.gating_input_projection.bias.max().item():.6f}")
 
         # NEW: Expert identity embeddings
         self.expert_embedding_dim = getattr(config, 'expert_embedding_dim', 32) # Default to 32 if not specified
@@ -188,14 +195,25 @@ class Linear_extractor_cluster(nn.Module):
 
     def noisy_top_k_gating(self, x, train, gating_input=None):
         # Use gating_input if provided, otherwise use x
-        print(f"DEBUG: Input x stats: mean={x.mean().item():.6f}, std={x.std().item():.6f}, min={x.min().item():.6f}, max={x.max().item():.6f}")
+        # print(f"DEBUG: Input x stats: mean={x.mean().item():.6f}, std={x.std().item():.6f}, min={x.min().item():.6f}, max={x.max().item():.6f}")
         if gating_input is None:
             # Debugging: Check stats of the input to gating_input_projection
             input_to_gating_proj = x[:, -1, :]
-            print(f"DEBUG: input_to_gating_proj stats: mean={input_to_gating_proj.mean().item():.6f}, std={input_to_gating_proj.std().item():.6f}, min={input_to_gating_proj.min().item():.6f}, max={input_to_gating_proj.max().item():.6f}")
+            # print(f"DEBUG: input_to_gating_proj stats: mean={input_to_gating_proj.mean().item():.6f}, std={input_to_gating_proj.std().item():.6f}, min={input_to_gating_proj.min().item():.6f}, max={input_to_gating_proj.max().item():.6f}")
             
-            context_for_gating = torch.nan_to_num(self.gating_input_projection(input_to_gating_proj))
-            print(f"DEBUG: context_for_gating stats: mean={context_for_gating.mean().item():.6f}, std={context_for_gating.std().item():.6f}, min={context_for_gating.min().item():.6f}, max={context_for_gating.max().item():.6f}")
+            # NEW DEBUG PRINTS FOR GATING_INPUT_PROJECTION
+            if hasattr(self.gating_input_projection, 'weight'):
+                # print(f"DEBUG: gating_input_projection.weight stats: mean={self.gating_input_projection.weight.mean().item():.6f}, std={self.gating_input_projection.weight.std().item():.6f}, min={self.gating_input_projection.weight.min().item():.6f}, max={self.gating_input_projection.weight.max().item():.6f}")
+                pass
+            if hasattr(self.gating_input_projection, 'bias'):
+                # print(f"DEBUG: gating_input_projection.bias stats: mean={self.gating_input_projection.bias.mean().item():.6f}, std={self.gating_input_projection.bias.std().item():.6f}, min={self.gating_input_projection.bias.min().item():.6f}, max={self.gating_input_projection.bias.max().item():.6f}")
+                pass
+            
+            raw_gating_output = self.gating_input_projection(input_to_gating_proj)
+            # print(f"DEBUG: raw_gating_output stats (before nan_to_num): mean={raw_gating_output.mean().item():.6f}, std={raw_gating_output.std().item():.6f}, min={raw_gating_output.min().item():.6f}, max={raw_gating_output.max().item():.6f}")
+
+            context_for_gating = torch.nan_to_num(raw_gating_output)
+            # print(f"DEBUG: context_for_gating stats (after nan_to_num): mean={context_for_gating.mean().item():.6f}, std={context_for_gating.std().item():.6f}, min={context_for_gating.min().item():.6f}, max={context_for_gating.max().item():.6f}")
         else:
             context_for_gating = gating_input
 
@@ -234,21 +252,21 @@ class Linear_extractor_cluster(nn.Module):
            
 
             raw_noise_logits = self.noise(input_for_gating_flat)
-            print(f"DEBUG: raw_noise_logits stats: mean={raw_noise_logits.mean().item():.6f}, std={raw_noise_logits.std().item():.6f}, min={raw_noise_logits.min().item():.6f}, max={raw_noise_logits.max().item():.6f}")
+            # print(f"DEBUG: raw_noise_logits stats: mean={raw_noise_logits.mean().item():.6f}, std={raw_noise_logits.std().item():.6f}, min={raw_noise_logits.min().item():.6f}, max={raw_noise_logits.max().item():.6f}")
 
 
             raw_noise_logits = torch.nan_to_num(raw_noise_logits)
 
 
             noise_stddev_flat = torch.clamp(self.softplus(raw_noise_logits), min=1e-6) + self.config.noise_epsilon
-            print(f"DEBUG: noise_stddev_flat stats: mean={noise_stddev_flat.mean().item():.6f}, std={noise_stddev_flat.std().item():.6f}, min={noise_stddev_flat.min().item():.6f}, max={noise_stddev_flat.max().item():.6f}")
+            # print(f"DEBUG: noise_stddev_flat stats: mean={noise_stddev_flat.mean().item():.6f}, std={noise_stddev_flat.std().item():.6f}, min={noise_stddev_flat.min().item():.6f}, max={noise_stddev_flat.max().item():.6f}")
 
 
             random_noise = torch.randn_like(clean_logits_flat)
-            print(f"DEBUG: random_noise stats: mean={random_noise.mean().item():.6f}, std={random_noise.std().item():.6f}, min={random_noise.min().item():.6f}, max={random_noise.max().item():.6f}")
+            # print(f"DEBUG: random_noise stats: mean={random_noise.mean().item():.6f}, std={random_noise.std().item():.6f}, min={random_noise.min().item():.6f}, max={random_noise.max().item():.6f}")
 
             noisy_logits_flat = clean_logits_flat + (random_noise * noise_stddev_flat)
-            print(f"DEBUG: noisy_logits_flat stats: mean={noisy_logits_flat.mean().item():.6f}, std={noisy_logits_flat.std().item():.6f}, min={noisy_logits_flat.min().item():.6f}, max={noisy_logits_flat.max().item():.6f}")
+            # print(f"DEBUG: noisy_logits_flat stats: mean={noisy_logits_flat.mean().item():.6f}, std={noisy_logits_flat.std().item():.6f}, min={noisy_logits_flat.min().item():.6f}, max={noisy_logits_flat.max().item():.6f}")
         else:
             noisy_logits_flat = clean_logits_flat
 

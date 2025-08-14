@@ -104,7 +104,7 @@ if __name__ == "__main__":
     # --- Modify FIXED_PARAMS for a short run ---
     FIXED_PARAMS['num_epochs'] = 1
     # This is a new parameter I will add to the model to limit the number of batches
-    FIXED_PARAMS['debug_max_batches'] = 5 
+    FIXED_PARAMS['debug_max_batches'] = 1 
 
     print("Running a single short trial for debugging...")
     

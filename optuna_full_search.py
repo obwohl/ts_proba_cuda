@@ -41,7 +41,7 @@ FIXED_PARAMS = {
     "num_epochs":1,
     "patience": 3,
     "early_stopping_delta": 1e-4,
-    "debug_gating": True, # NEU: Schalter für detailliertes Gating-Logging
+    "debug_gating": False, # NEU: Schalter für detailliertes Gating-Logging
     
 
     "distribution_family": "bgev", # Options: "Johnson", "AutoGPD", "bgev"
@@ -344,7 +344,7 @@ if __name__ == "__main__":
     # Führe die Optimierung ohne festes n_trials aus.
     # Der Worker läuft so lange, bis er extern beendet wird (z.B. durch Strg+C im run_study.py Skript).
     # Dies ist die Standardmethode für parallele Studien, bei denen die Gesamtzahl der Trials nicht pro Worker festgelegt wird.
-    study.optimize(lambda trial: objective(trial, data), n_trials=None)
+    study.optimize(lambda trial: objective(trial, data, STUDY_NAME), n_trials=None)
 
     print("\n\n" + "="*50 + "\nHEURISTIC SEARCH FINISHED\n" + "="*50)
     try:

@@ -258,18 +258,12 @@ class DUETProb(ModelBase):
             log_msg += f" | Linear Weights: μ={batch_gate_weights_linear.mean().item():.3f}, σ={batch_gate_weights_linear.std().item():.3f}"
         if batch_gate_weights_uni_esn.numel() > 0:
             log_msg += f" | Univariate ESN Weights: μ={batch_gate_weights_uni_esn.mean().item():.3f}, σ={batch_gate_weights_uni_esn.std().item():.3f}"
-        if batch_gate_weights_multi_esn.numel() > 0:
+        if batch_gate_weights_multi_esn.numel() > 1:
             log_msg += f" | Multivariate ESN Weights: μ={batch_gate_weights_multi_esn.mean().item():.3f}, σ={batch_gate_weights_multi_esn.std().item():.3f}"
+        else:
+            log_msg += f" | Multivariate ESN Weights: μ={batch_gate_weights_multi_esn.mean().item():.3f}, σ=0.0"
 
         self.gating_logger.info(log_msg)
-
-        # Log individual expert gating weights for more granularity
-        if batch_gate_weights_linear.numel() > 0:
-            self.gating_logger.info(f"Epoch: {epoch:<3} | Phase: {phase:<10} | Individual Linear Weights: {batch_gate_weights_linear.tolist()}")
-        if batch_gate_weights_uni_esn.numel() > 0:
-            self.gating_logger.info(f"Epoch: {epoch:<3} | Phase: {phase:<10} | Individual Univariate ESN Weights: {batch_gate_weights_uni_esn.tolist()}")
-        if batch_gate_weights_multi_esn.numel() > 0:
-            self.gating_logger.info(f"Epoch: {epoch:<3} | Phase: {phase:<10} | Individual Multivariate ESN Weights: {batch_gate_weights_multi_esn.tolist()}")
 
         self.model.train() # Zurück in den Trainingsmodus
 
@@ -495,12 +489,20 @@ class DUETProb(ModelBase):
         
         self._build_model()
 
-        device = torch.device("cpu")
+        if torch.backends.mps.is_available():
+            device = torch.device("mps")
+            print("--- Using MPS device. ---")
+        elif torch.cuda.is_available():
+            device = torch.device("cuda")
+            print("--- Using CUDA device. ---")
+        else:
+            device = torch.device("cpu")
+            print("--- Using CPU device. ---")
         self.model.to(device)
 
         print(f"--- Model Analysis ---Total trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
 
-        if torch.cuda.device_count() > 1:
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
             self.model = nn.DataParallel(self.model)
 
         train_data, valid_data = train_val_split(train_valid_data, train_ratio_in_tv, config.seq_len)
@@ -643,10 +645,10 @@ class DUETProb(ModelBase):
                         
                         denorm_distr, base_distr, loss_importance, batch_gate_weights_linear, batch_gate_weights_uni_esn, batch_gate_weights_multi_esn, batch_selection_counts, p_learned, p_final, clean_logits, noisy_logits, distr_params = self.model(input_data)
                         
-                        print(f"DEBUG: Batch {i} - Input x stats: mean={input_data.mean():.6f}, std={input_data.std():.6f}, min={input_data.min():.6f}, max={input_data.max():.6f}")
-                        print(f"DEBUG: Batch {i} - Target y stats: mean={target.mean():.6f}, std={target.std():.6f}, min={target.min():.6f}, max={target.max():.6f}")
-                        print(f"DEBUG: Batch {i} - Denorm Distr mean stats: mean={denorm_distr.mean.mean():.6f}, std={denorm_distr.mean.std():.6f}")
-                        print(f"DEBUG: Batch {i} - Loss Importance: {loss_importance.item():.6f}")
+                        # print(f"DEBUG: Batch {i} - Input x stats: mean={input_data.mean():.6f}, std={input_data.std():.6f}, min={input_data.min():.6f}, max={input_data.max():.6f}")
+                        # print(f"DEBUG: Batch {i} - Target y stats: mean={target.mean():.6f}, std={target.std():.6f}, min={target.min():.6f}, max={target.max():.6f}")
+                        # print(f"DEBUG: Batch {i} - Denorm Distr mean stats: mean={denorm_distr.mean.mean():.6f}, std={denorm_distr.mean.std():.6f}")
+                        # print(f"DEBUG: Batch {i} - Loss Importance: {loss_importance.item():.6f}")
 
                         target_horizon = target[:, -config.horizon:, :]
 
@@ -683,16 +685,16 @@ class DUETProb(ModelBase):
                                 if param.grad is not None:
                                     if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
                                         tqdm.write(f"  -> ☠️ PRUNING: NaN/Inf detected in gradient of parameter {name}. Value: {param.grad.data}")
-                                        raise optuna.exceptions.TrialPruned(f"NaN/Inf detected in gradient of parameter {name}.")
+                                        pass # Temporarily disabled for debugging
 
                             # Debug prints for gamma and beta gradients
                             model_ref = self.model.module if hasattr(self.model, 'module') else self.model
-                            if hasattr(model_ref.cluster.revin, 'gamma') and model_ref.cluster.revin.gamma.grad is not None:
-                                gamma_grad = model_ref.cluster.revin.gamma.grad
-                                tqdm.write(f"DEBUG: gamma.grad stats (before opt.step): mean={gamma_grad.mean():.6f}, std={gamma_grad.std():.6f}, min={gamma_grad.min():.6f}, max={gamma_grad.max():.6f}")
-                            if hasattr(model_ref.cluster.revin, 'beta') and model_ref.cluster.revin.beta.grad is not None:
-                                beta_grad = model_ref.cluster.revin.beta.grad
-                                tqdm.write(f"DEBUG: beta.grad stats (before opt.step): mean={beta_grad.mean():.6f}, std={beta_grad.std():.6f}, min={beta_grad.min():.6f}, max={beta_grad.max():.6f}")
+                            # if hasattr(model_ref.cluster.revin, 'gamma') and model_ref.cluster.revin.gamma.grad is not None:
+                            #     gamma_grad = model_ref.cluster.revin.gamma.grad
+                            #     tqdm.write(f"DEBUG: gamma.grad stats (before opt.step): mean={gamma_grad.mean():.6f}, std={gamma_grad.std():.6f}, min={gamma_grad.min():.6f}, max={gamma_grad.max():.6f}")
+                            # if hasattr(model_ref.cluster.revin, 'beta') and model_ref.cluster.revin.beta.grad is not None:
+                            #     beta_grad = model_ref.cluster.revin.beta.grad
+                            #     tqdm.write(f"DEBUG: beta.grad stats (before opt.step): mean={beta_grad.mean():.6f}, std={beta_grad.std():.6f}, min={beta_grad.min():.6f}, max={beta_grad.max():.6f}")
 
                             if config.use_agc:
                                 adaptive_clip_grad_(self.model.parameters(), clip_factor=config.agc_lambda)

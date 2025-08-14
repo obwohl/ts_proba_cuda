@@ -113,6 +113,12 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
 
         # --- Core components of DUET (are preserved) ---
         self.cluster = Linear_extractor_cluster(config)
+        # NEW DEBUG PRINTS
+        # if hasattr(self.cluster.gating_input_projection, 'weight'):
+        #     print(f"DEBUG: DUETProbModel.__init__ - cluster.gating_input_projection.weight stats: mean={self.cluster.gating_input_projection.weight.mean().item():.6f}, std={self.cluster.gating_input_projection.weight.std().item():.6f}, min={self.cluster.gating_input_projection.weight.min().item():.6f}, max={self.cluster.gating_input_projection.weight.max().item():.6f}")
+        # if hasattr(self.cluster.gating_input_projection, 'bias'):
+        #     print(f"DEBUG: DUETProbModel.__init__ - cluster.gating_input_projection.bias stats: mean={self.cluster.gating_input_projection.bias.mean().item():.6f}, std={self.cluster.gating_input_projection.bias.std().item():.6f}, min={self.cluster.gating_input_projection.bias.min().item():.6f}, max={self.cluster.gating_input_projection.bias.max().item():.6f}")
+
         self.expert_embedding_dim = config.expert_embedding_dim
         self.CI = config.CI
         self.n_vars = config.enc_in
@@ -192,11 +198,11 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
     def forward(self, input_x: torch.Tensor):
         # input_x: [Batch, SeqLen, NVars]
 
-        print(f"DEBUG: DUETProbModel.forward - Input_x stats (before RevIN): mean={input_x.mean():.6f}, std={input_x.std():.6f}, min={input_x.min():.6f}, max={input_x.max():.6f}")
+        # print(f"DEBUG: DUETProbModel.forward - Input_x stats (before RevIN): mean={input_x.mean():.6f}, std={input_x.std():.6f}, min={input_x.min():.6f}, max={input_x.max():.6f}")
         x_for_main_model, stats = self.cluster.revin(input_x, 'norm')
 
         x_for_main_model = torch.nan_to_num(x_for_main_model)
-        print(f"DEBUG: DUETProbModel.forward - x_for_main_model stats (after RevIN): mean={x_for_main_model.mean():.6f}, std={x_for_main_model.std():.6f}, min={x_for_main_model.min():.6f}, max={x_for_main_model.max():.6f}")
+        # print(f"DEBUG: DUETProbModel.forward - x_for_main_model stats (after RevIN): mean={x_for_main_model.mean():.6f}, std={x_for_main_model.std():.6f}, min={x_for_main_model.min():.6f}, max={x_for_main_model.max():.6f}")
 
         temporal_feature, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, clean_logits, noisy_logits = self.cluster(x_for_main_model)
         # print(f"DEBUG: temporal_feature | Shape: {temporal_feature.shape} | Mean: {temporal_feature.mean():.4f} | Std: {temporal_feature.std():.4f} | Min: {temporal_feature.min():.4f} | Max: {temporal_feature.max():.4f}")
