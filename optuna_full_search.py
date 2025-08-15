@@ -15,6 +15,7 @@ import pandas as pd
 from ts_benchmark.baselines.duet.duet_prob import DUETProb, calculate_cvar
 from ts_benchmark.data.data_source import LocalForecastingDataSource
 from ts_benchmark.baselines.utils import forecasting_data_provider, train_val_split
+from ts_benchmark.baselines.duet.johnson_system import get_best_johnson_fit
 
 
 # --- FIX: "Too many open files" Error ---
@@ -38,13 +39,13 @@ FIXED_PARAMS = {
     # Setze hier einen Kanalnamen (z.B. "wassertemp"), um den Validierungs-Loss nur für diesen Kanal zu berechnen.
     # Setze auf `None`, um den Durchschnitt über alle Kanäle zu verwenden (Standardverhalten).
     "optimization_target_channel": None,
-    "num_epochs":1,
+    "num_epochs":30,
     "patience": 3,
     "early_stopping_delta": 1e-4,
     "debug_gating": False, # NEU: Schalter für detailliertes Gating-Logging
     
 
-    "distribution_family": "bgev", # Options: "Johnson", "AutoGPD", "bgev"
+    "distribution_family": "Johnson", # Options: "Johnson", "AutoGPD", "bgev"
     
     "num_workers": 0, # HARDCODED TO 0 TO PREVENT "TOO MANY OPEN FILES" ERROR
     "quantiles": [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99], # <-- HIER ERWEITERN
@@ -167,7 +168,8 @@ def get_suggested_params(trial: optuna.Trial) -> dict:
 
     return params
 
-def objective(trial: optuna.Trial, data: pd.DataFrame, study_name: str) -> float:
+def objective(trial: optuna.Trial, data: pd.DataFrame, study_name: str, johnson_system_map: dict) -> float:
+    torch.autograd.set_detect_anomaly(True)
     """Führt einen Trainingslauf durch und gibt die beiden Zielmetriken (avg_crps, cvar_crps) zurück."""
     trial_num = trial.number
     print(f"\n\n{'='*20} STARTING TRIAL #{trial_num} {'='*20}")
@@ -191,7 +193,7 @@ def objective(trial: optuna.Trial, data: pd.DataFrame, study_name: str) -> float
         # 1. Initialisiere das Modell mit den geprüften Parametern
         # Die Logik für die Loss-Funktion ist nun im DUETProb-Modell selbst enthalten
         # und wird basierend auf der `distribution_family` ausgewählt.
-        model = DUETProb(**model_hyper_params)
+        model = DUETProb(johnson_system_map=johnson_system_map, **model_hyper_params)
 
         # 2. Führe das Training aus.
         model.forecast_fit(data, train_ratio_in_tv=model_hyper_params["train_ratio_in_tv"], trial=trial)
@@ -302,6 +304,20 @@ def setup_logging(study_name: str):
     # sys.stdout = open(log_file_path, 'a')
     # sys.stderr = open(log_file_path, 'a')
     # print(f"Logging for PID {pid} is set up to write to {log_file_path}")
+
+def analyze_johnson_systems(data: pd.DataFrame) -> dict:
+    """Führt die Johnson-System-Analyse einmalig für alle Kanäle durch."""
+    print("--- Analyzing data distribution to select Johnson system type for each channel (one-time)... ---")
+    # Wir verwenden einen kleinen Teil der Daten für eine schnelle Anpassung
+    train_data_for_fit, _ = train_val_split(data, 0.1, 96) # Verwende 10% der Daten und eine feste seq_len
+    
+    system_map = {}
+    for col_name in train_data_for_fit.columns:
+        best_fit = get_best_johnson_fit(train_data_for_fit[col_name].values)
+        system_map[col_name] = best_fit
+        print(f"  -> Channel '{col_name}': Best fit is Johnson {best_fit}")
+    print("--- Johnson system analysis complete. ---\n")
+    return system_map
     
 if __name__ == "__main__":
     import argparse
@@ -341,10 +357,13 @@ if __name__ == "__main__":
     data = data_source._load_series(FIXED_PARAMS['data_file'])
     print("Data loaded successfully. Starting optimization...")
 
+    # NEU: Führe die Johnson-Analyse einmalig vor der Studie aus
+    johnson_map = analyze_johnson_systems(data)
+
     # Führe die Optimierung ohne festes n_trials aus.
     # Der Worker läuft so lange, bis er extern beendet wird (z.B. durch Strg+C im run_study.py Skript).
     # Dies ist die Standardmethode für parallele Studien, bei denen die Gesamtzahl der Trials nicht pro Worker festgelegt wird.
-    study.optimize(lambda trial: objective(trial, data, STUDY_NAME), n_trials=None)
+    study.optimize(lambda trial: objective(trial, data, STUDY_NAME, johnson_map), n_trials=None)
 
     print("\n\n" + "="*50 + "\nHEURISTIC SEARCH FINISHED\n" + "="*50)
     try:
@@ -372,3 +391,4 @@ if __name__ == "__main__":
         print("No successful trials were completed.")
     print("\nTo analyze the results, use the 'analyse_study.py' script.")
     print("To visualize the Pareto front, use: optuna.visualization.plot_pareto_front(study)")
+")

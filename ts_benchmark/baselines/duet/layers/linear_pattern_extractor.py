@@ -57,6 +57,8 @@ class Linear_extractor(nn.Module):
         seasonal_init, trend_init = self.decompsition(x)
         seasonal_init, trend_init = seasonal_init.permute(
             0, 2, 1), trend_init.permute(0, 2, 1)
+        seasonal_init = torch.nan_to_num(seasonal_init)
+        trend_init = torch.nan_to_num(trend_init)
         if self.individual:
             seasonal_output = torch.zeros([seasonal_init.size(0), seasonal_init.size(1), self.pred_len],
                                           dtype=seasonal_init.dtype).to(seasonal_init.device)

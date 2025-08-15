@@ -178,9 +178,13 @@ class TransformerConfig:
 
 
 class DUETProb(ModelBase):
-    def __init__(self, **kwargs):
+    def __init__(self, johnson_system_map: Optional[Dict[str, str]] = None, **kwargs):
         super(DUETProb, self).__init__()
         self.config = TransformerConfig(**kwargs)
+        # NEU: Übernehme die vorab berechnete Johnson-System-Map
+        if johnson_system_map:
+            setattr(self.config, 'johnson_system_map', johnson_system_map)
+            
         self.seq_len = self.config.seq_len
         self.model: Optional[nn.Module] = None
         self.early_stopping: Optional[EarlyStopping] = None
@@ -298,14 +302,29 @@ class DUETProb(ModelBase):
         train_data_for_fit, _ = train_val_split(train_valid_data, 0.9, self.config.seq_len)
 
         if self.config.distribution_family == "Johnson":
-            print("--- Analyzing data distribution to select Johnson system type for each channel... ---")
-            channel_types = []
-            for col_name in train_data_for_fit.columns:
-                best_fit = get_best_johnson_fit(train_data_for_fit[col_name].values)
-                channel_types.append(best_fit)
-                print(f"  -> Channel '{col_name}': Best fit is Johnson {best_fit}")
-            setattr(self.config, 'channel_types', channel_types)
-            print("--- Johnson system analysis complete. ---\n")
+            # NEU: Prüfe, ob eine vorab berechnete Map vorhanden ist
+            if hasattr(self.config, 'johnson_system_map') and self.config.johnson_system_map:
+                print("--- Using pre-computed Johnson system map for each channel... ---")
+                channel_types = []
+                # Stelle sicher, dass die Reihenfolge der Kanäle mit den Daten übereinstimmt
+                for col_name in train_data_for_fit.columns:
+                    if col_name not in self.config.johnson_system_map:
+                        raise ValueError(f"Channel '{col_name}' not found in the pre-computed Johnson system map.")
+                    best_fit = self.config.johnson_system_map[col_name]
+                    channel_types.append(best_fit)
+                    print(f"  -> Channel '{col_name}': Using pre-computed fit: Johnson {best_fit}")
+                setattr(self.config, 'channel_types', channel_types)
+                print("--- Johnson system setup from map complete. ---\n")
+            else:
+                # Fallback: Führe die Analyse durch, wenn keine Map vorhanden ist
+                print("--- Analyzing data distribution to select Johnson system type for each channel... ---")
+                channel_types = []
+                for col_name in train_data_for_fit.columns:
+                    best_fit = get_best_johnson_fit(train_data_for_fit[col_name].values)
+                    channel_types.append(best_fit)
+                    print(f"  -> Channel '{col_name}': Best fit is Johnson {best_fit}")
+                setattr(self.config, 'channel_types', channel_types)
+                print("--- Johnson system analysis complete. ---\n")
         elif self.config.distribution_family == "AutoGPD":
             print("--- Analyzing data for Zero-Inflation for each channel... ---")
             is_zero_inflated_list = []
@@ -652,13 +671,10 @@ class DUETProb(ModelBase):
 
                         target_horizon = target[:, -config.horizon:, :]
 
-                        if self.config.distribution_family == "Johnson":
-                            norm_target = denorm_distr.normalize_value(target_horizon).permute(0, 2, 1)
-                            log_probs = base_distr.log_prob(norm_target)
-                            nll_loss = -log_probs.mean()
-                        else:
-                            log_probs = denorm_distr.log_prob(target_horizon)
-                            nll_loss = -log_probs.mean()
+                        # CORRECTED: Always use the denormalizing distribution's log_prob,
+                        # which correctly handles the Jacobian for all applicable families (like Johnson).
+                        log_probs = denorm_distr.log_prob(target_horizon)
+                        nll_loss = -log_probs.mean()
 
                         log_probs = torch.clamp(log_probs, min=-1e8)
 
@@ -676,6 +692,37 @@ class DUETProb(ModelBase):
                             denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
                             epoch_denorm_losses_per_channel.append(denorm_loss_per_sample.cpu().numpy())
 
+                        if i == 0 and epoch == 0:
+                            tqdm.write(f"--- DEBUG START: First Batch ---")
+                            tqdm.write(f"Input data shape: {input_data.shape}")
+                            tqdm.write(f"Input data stats: mean={input_data.mean():.4f}, std={input_data.std():.4f}, min={input_data.min():.4f}, max={input_data.max():.4f}")
+                            if torch.isnan(input_data).any():
+                                tqdm.write(">>> WARNING: NaN found in input_data!")
+                            
+                            tqdm.write(f"Target data shape: {target.shape}")
+                            tqdm.write(f"Target data stats: mean={target.mean():.4f}, std={target.std():.4f}, min={target.min():.4f}, max={target.max():.4f}")
+                            if torch.isnan(target).any():
+                                tqdm.write(">>> WARNING: NaN found in target!")
+
+                            # Inspecting model outputs (distribution parameters)
+                            if hasattr(denorm_distr, 'mean'):
+                                tqdm.write(f"Distribution mean stats: mean={denorm_distr.mean.mean():.4f}, std={denorm_distr.mean.std():.4f}")
+                                if torch.isnan(denorm_distr.mean).any():
+                                    tqdm.write(">>> WARNING: NaN found in distribution mean!")
+                            try:
+                                stddev_val = denorm_distr.stddev
+                                tqdm.write(f"Distribution stddev stats: mean={stddev_val.mean():.4f}, std={stddev_val.std():.4f}")
+                                if torch.isnan(stddev_val).any():
+                                    tqdm.write(">>> WARNING: NaN found in distribution stddev!")
+                            except NotImplementedError:
+                                tqdm.write("Distribution stddev not implemented for this distribution.")
+                            
+                            # Inspecting loss components
+                            tqdm.write(f"Loss (NLL): {nll_loss.item():.4f}")
+                            tqdm.write(f"Loss (Importance): {loss_importance.item():.4f}")
+                            tqdm.write(f"Loss (Total): {total_loss.item():.4f}")
+                            tqdm.write(f"--- DEBUG END: First Batch ---")
+
                         scaled_loss = total_loss / accumulation_steps
                         scaled_loss.backward()
 
@@ -685,7 +732,12 @@ class DUETProb(ModelBase):
                                 if param.grad is not None:
                                     if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
                                         tqdm.write(f"  -> ☠️ PRUNING: NaN/Inf detected in gradient of parameter {name}. Value: {param.grad.data}")
-                                        pass # Temporarily disabled for debugging
+                                        raise optuna.exceptions.TrialPruned(f"NaN/Inf detected in gradient of parameter {name}. Value: {param.grad.data}")
+
+                            if config.use_agc:
+                                adaptive_clip_grad_(self.model.parameters(), clip_factor=config.agc_lambda)
+                            else:
+                                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
                             # Debug prints for gamma and beta gradients
                             model_ref = self.model.module if hasattr(self.model, 'module') else self.model
@@ -994,13 +1046,8 @@ Importance Loss         : {metrics['train_loss_importance']:.6f}  (MoE balance)
 
                 denorm_distr, base_distr, _, _, _, _, _, _, _, _, _, _ = self.model(input_data)
                 
-                if self.config.distribution_family == "Johnson":
-                    denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
-                    norm_target = denorm_distr.normalize_value(target_horizon).permute(0, 2, 1)
-                    norm_loss_per_sample = -base_distr.log_prob(norm_target).mean(dim=2)
-                else:
-                    denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
-                    norm_loss_per_sample = denorm_loss_per_sample
+                denorm_loss_per_sample = -denorm_distr.log_prob(target_horizon).mean(dim=2)
+                norm_loss_per_sample = denorm_loss_per_sample
 
                 all_denorm_losses.append(denorm_loss_per_sample.cpu().numpy())
                 all_norm_losses.append(norm_loss_per_sample.cpu().numpy())

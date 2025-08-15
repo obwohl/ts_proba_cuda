@@ -8,7 +8,7 @@ import uuid
 import signal
 
 # -- Studien-Konfiguration --
-STUDY_NAME = "eisbach_bgev"
+STUDY_NAME = "eisbach_johnson_3"
 STORAGE_NAME = "sqlite:///optuna_study.db"  # Fester DB-Name. Studien werden intern durch STUDY_NAME unterschieden.
 
 # -- Parallelisierungs-Konfiguration --

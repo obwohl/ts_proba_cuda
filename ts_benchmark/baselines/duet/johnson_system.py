@@ -60,12 +60,17 @@ class JohnsonSB_torch(Distribution):
         value_safe = torch.clamp(value, lower + 1e-9, upper - 1e-9)
         
         y = (value_safe - self.xi) / self.lambda_
-        z = self.gamma + self.delta * (y / (1 - y)).log()
         
-        log_p = self._log_delta - self._log_lambda - self._log_sqrt_2pi - 0.5 * z.pow(2) - y.log() - (1 - y).log()
+        # --- FIX: Clamp the input to log to prevent numerical instability ---
+        # Add a small epsilon to prevent log(0) or log(inf)
+        y_safe_for_log = torch.clamp(y, 1e-9, 1 - 1e-9)
         
-        # Ensure that any original values outside the support get -inf probability
-        log_p = torch.where((value > lower) & (value < upper), log_p, torch.full_like(log_p, -float('inf')))
+        z = self.gamma + self.delta * (y_safe_for_log / (1 - y_safe_for_log)).log()
+        
+        log_p = self._log_delta - self._log_lambda - self._log_sqrt_2pi - 0.5 * z.pow(2) - y_safe_for_log.log() - (1 - y_safe_for_log).log()
+        
+        # Ensure that any original values outside the support get a large negative probability
+        log_p = torch.where((value > lower) & (value < upper), log_p, torch.full_like(log_p, -1e8))
         return log_p
 
 # --- SCIPY WRAPPERS (ONLY FOR NON-CRITICAL ICDF FUNCTION) ---
@@ -337,6 +342,12 @@ class JohnsonOutput:
         xi = xi_raw.squeeze(-1)
         lambda_ = F.softplus(lambda_raw.squeeze(-1)) + 1e-6
 
+        # Sanitize parameters to prevent NaNs/Infs from propagating
+        gamma = torch.nan_to_num(gamma, nan=0.0, posinf=1.0, neginf=-1.0)
+        delta = torch.nan_to_num(delta, nan=1.0, posinf=1.0, neginf=1.0)
+        xi = torch.nan_to_num(xi, nan=0.0, posinf=1.0, neginf=-1.0)
+        lambda_ = torch.nan_to_num(lambda_, nan=1.0, posinf=1.0, neginf=1.0)
+
         return CombinedJohnsonDistribution(
             channel_types=self.channel_types, # FIX: Pass self.channel_types
             gamma=gamma, delta=delta, xi=xi, lambda_=lambda_
@@ -393,8 +404,8 @@ class CombinedJohnsonDistribution(Distribution):
             dist = torch.distributions.LogNormal(self.xi[:, indices, :], self.lambda_[:, indices, :])
             log_p_sl = dist.log_prob(sl_value_clamped)
             
-            # Set log_prob to -inf for out-of-support values
-            log_p[:, indices, :] = torch.where(out_of_support_mask, torch.full_like(log_p_sl, -float('inf')), log_p_sl)
+            # Set log_prob to a large negative number for out-of-support values
+            log_p[:, indices, :] = torch.where(out_of_support_mask, torch.full_like(log_p_sl, -1e8), log_p_sl)
 
         if self.sn_mask.any():
             indices = self.sn_mask.nonzero(as_tuple=True)[0]

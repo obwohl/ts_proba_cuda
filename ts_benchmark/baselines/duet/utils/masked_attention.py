@@ -197,6 +197,9 @@ class Mahalanobis_mask(nn.Module):
         # Normalize by the single max value in the matrix.
         max_val = torch.max(off_diag_inv_dist, dim=-1, keepdim=True)[0].detach()
         p_learned = off_diag_inv_dist / (max_val + 1e-9)
+        if torch.isnan(p_learned).any() or torch.isinf(p_learned).any():
+            print("!!! DIAGNOSTIC: NaN/Inf detected in 'p_learned' in Mahalanobis_mask - replacing with 0.5 !!!")
+            p_learned = torch.nan_to_num(p_learned, nan=0.5, posinf=0.5, neginf=0.5) # Replace with a neutral value
 
         # Add the diagonal back and apply the magic number scaling.
         p_learned = p_learned + torch.eye(p_learned.shape[-1], device=p_learned.device).unsqueeze(0)

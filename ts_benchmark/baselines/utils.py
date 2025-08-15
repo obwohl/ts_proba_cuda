@@ -200,7 +200,7 @@ def forecasting_data_provider(data, config, timeenc, batch_size, shuffle, drop_l
         shuffle=shuffle,
         num_workers=0,
         drop_last=drop_last,
-        pin_memory=True,  # Beschleunigt den Datentransfer zur GPU
+        pin_memory=False,  # Beschleunigt den Datentransfer zur GPU
     )
 
     return dataset, data_loader

@@ -198,21 +198,23 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
     def forward(self, input_x: torch.Tensor):
         # input_x: [Batch, SeqLen, NVars]
 
-        # print(f"DEBUG: DUETProbModel.forward - Input_x stats (before RevIN): mean={input_x.mean():.6f}, std={input_x.std():.6f}, min={input_x.min():.6f}, max={input_x.max():.6f}")
+        # --- STAGE 1: RevIN --- 
         x_for_main_model, stats = self.cluster.revin(input_x, 'norm')
+        if torch.isnan(x_for_main_model).any() or torch.isinf(x_for_main_model).any():
+            print("!!! NaN/Inf DETECTED AFTER RevIN !!!")
+            print(f"Input stats: mean={input_x.mean():.4f}, std={input_x.std():.4f}, min={input_x.min():.4f}, max={input_x.max():.4f}")
+            print(f"RevIN stats (std): mean={stats[:, :, 1].mean():.4f}, std={stats[:, :, 1].std():.4f}, min={stats[:, :, 1].min():.4f}, max={stats[:, :, 1].max():.4f}")
 
-        x_for_main_model = torch.nan_to_num(x_for_main_model)
-        # print(f"DEBUG: DUETProbModel.forward - x_for_main_model stats (after RevIN): mean={x_for_main_model.mean():.6f}, std={x_for_main_model.std():.6f}, min={x_for_main_model.min():.6f}, max={x_for_main_model.max():.6f}")
-
+        # --- STAGE 2: Mixture of Experts (MoE) Cluster ---
         temporal_feature, L_importance, avg_gate_weights_linear, avg_gate_weights_uni_esn, avg_gate_weights_multi_esn, expert_selection_counts, clean_logits, noisy_logits = self.cluster(x_for_main_model)
-        # print(f"DEBUG: temporal_feature | Shape: {temporal_feature.shape} | Mean: {temporal_feature.mean():.4f} | Std: {temporal_feature.std():.4f} | Min: {temporal_feature.min():.4f} | Max: {temporal_feature.max():.4f}")
-        # print(f"DEBUG: clean_logits | Shape: {clean_logits.shape} | Mean: {clean_logits.mean():.4f} | Std: {clean_logits.std():.4f} | Min: {clean_logits.min():.4f} | Max: {clean_logits.max():.4f}")
-        # print(f"DEBUG: noisy_logits | Shape: {noisy_logits.shape} | Mean: {noisy_logits.mean():.4f} | Std: {noisy_logits.std():.4f} | Min: {noisy_logits.min():.4f} | Max: {noisy_logits.max():.4f}")
+        if torch.isnan(temporal_feature).any() or torch.isinf(temporal_feature).any():
+            print("!!! NaN/Inf DETECTED AFTER MoE CLUSTER !!!")
 
         temporal_feature = rearrange(temporal_feature, 'b d n -> b n d')
         
         p_learned, p_final = None, None
 
+        # --- STAGE 3: Channel Transformer ---
         if self.n_vars > 1:
             changed_input = rearrange(x_for_main_model, 'b l n -> b n l')
             channel_mask, p_learned, p_final = self.mask_generator(
@@ -225,14 +227,20 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
             if self.n_vars == 1:
                 p_learned = torch.ones(input_x.shape[0], 1, 1, device=input_x.device)
                 p_final = torch.ones(input_x.shape[0], 1, 1, device=input_x.device)
-        # print(f"DEBUG: channel_group_feature | Shape: {channel_group_feature.shape} | Mean: {channel_group_feature.mean():.4f} | Std: {channel_group_feature.std():.4f} | Min: {channel_group_feature.min():.4f} | Max: {channel_group_feature.max():.4f}")
+        
+        if torch.isnan(channel_group_feature).any() or torch.isinf(channel_group_feature).any():
+            print("!!! NaN/Inf DETECTED AFTER CHANNEL TRANSFORMER - REPLACING WITH ZEROS !!!")
+            channel_group_feature = torch.nan_to_num(channel_group_feature)
 
-
+        # --- STAGE 4: Projection Heads ---
         distr_params_list = []
         for i, name in enumerate(self.channel_names):
             channel_feature = channel_group_feature[:, i, :]
+            channel_feature = torch.nan_to_num(channel_feature) # Add NaN/Inf guard
             raw_params = self.projection_heads[name](channel_feature)
-            # print(f"DEBUG: raw_params (Channel {name}) | Shape: {raw_params.shape} | Mean: {raw_params.mean():.4f} | Std: {raw_params.std():.4f} | Min: {raw_params.min():.4f} | Max: {raw_params.max():.4f}")
+            
+            if torch.isnan(raw_params).any() or torch.isinf(raw_params).any():
+                print(f"!!! NaN/Inf DETECTED IN raw_params FOR CHANNEL '{name}' !!!")
 
             # The tanh activation is removed. Parameter constraints are now handled
             # by the distribution-specific output classes (e.g., JohnsonOutput)
@@ -243,7 +251,6 @@ class DUETProbModel(nn.Module):  # Renamed from DUETModel
 
 
         distr_params = torch.stack(distr_params_list, dim=1)
-        distr_params = torch.nan_to_num(distr_params, nan=0.0, posinf=1e4, neginf=-1e4)
 
         if self.config.distribution_family == "AutoGPD":
             # --- NEW: Dynamically adjust for non-zero-inflated channels ---

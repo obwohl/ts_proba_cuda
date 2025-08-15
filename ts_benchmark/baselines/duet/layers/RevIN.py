@@ -9,7 +9,7 @@ class RevIN(nn.Module):
     This version is simplified to subtract the last or median value, or perform no
     normalization at all, helping to stabilize training for non-stationary series.
     """
-    def __init__(self, num_features: int, eps=1e-4, affine=True, norm_mode='identity'):
+    def __init__(self, num_features: int, eps=1e-1, affine=True, norm_mode='identity'):
         """
         Args:
             num_features (int): The number of features or channels in the time series.
@@ -80,6 +80,7 @@ class RevIN(nn.Module):
             x_centered = x - self.location_stat
             
             self.scale_stat = torch.sqrt(torch.mean(x_centered**2, dim=1, keepdim=True) + self.eps).detach()
+            self.scale_stat = torch.clamp(self.scale_stat, min=1e-6) # Clamp to prevent extremely small scales
 
         elif self.norm_mode == 'subtract_median':
             # Location is the median value of the sequence.
@@ -90,24 +91,42 @@ class RevIN(nn.Module):
             x_reshaped = x.permute(0, 2, 1) # [B, N, L]
 
             batch_size, num_features, seq_len = x_reshaped.shape
-            scale_stats_per_channel = torch.ones(batch_size, num_features, 1, device=x.device, dtype=x.dtype) * self.eps # Initialize with eps
+            # Initialize with a small value, not self.eps, to avoid issues if MAD is zero
+            scale_stats_per_channel = torch.ones(batch_size, num_features, 1, device=x.device, dtype=x.dtype) * 1e-9 
+
+            # Define a very small epsilon for filtering "non-zero" values
+            epsilon_for_mad_filter = 1e-9 
 
             for b in range(batch_size):
                 for n in range(num_features):
                     channel_data = x_reshaped[b, n, :].contiguous()
-                    # Consider values greater than a small epsilon as non-zero
-                    non_zero_mask = channel_data > self.eps
-                    non_zero_values = channel_data[non_zero_mask]
+                    print(f"!!! DIAGNOSTIC: Channel {n} data stats (batch {b}): mean={channel_data.mean():.6f}, std={channel_data.std():.6f}, min={channel_data.min():.6f}, max={channel_data.max():.6f}")
+                    if torch.isnan(channel_data).any():
+                        print(f"!!! DIAGNOSTIC: NaN detected in channel {n} data (batch {b})!!!")
 
+                    # Use a very small epsilon for filtering non-zero values
+                    non_zero_mask = channel_data.abs() > epsilon_for_mad_filter 
+                    non_zero_values = channel_data[non_zero_mask]
+                    print(f"!!! DIAGNOSTIC: non_zero_values numel: {non_zero_values.numel()} (batch {b}, channel {n})")
                     if non_zero_values.numel() > 0: # Check if there are any significant non-zero values
                         # Calculate MAD for non-zero values
                         median_non_zero = torch.median(non_zero_values)
+                        print(f"!!! DIAGNOSTIC: median_non_zero: {median_non_zero.item()} (batch {b}, channel {n})")
+                        if torch.isnan(median_non_zero).any():
+                            print("!!! DIAGNOSTIC: NaN detected in `median_non_zero` !!!")
+
                         # MAD = median(|x - median(x)|)
                         mad = torch.median(torch.abs(non_zero_values - median_non_zero))
-                        scale_stats_per_channel[b, n, 0] = mad + self.eps # Add eps for stability
+                        print(f"!!! DIAGNOSTIC: MAD: {mad.item()} (batch {b}, channel {n})")
+                        if torch.isnan(mad).any():
+                            print("!!! DIAGNOSTIC: NaN detected in `mad` !!!")
+
+                        # Add self.eps (the larger one) for stability in the denominator
+                        scale_stats_per_channel[b, n, 0] = mad + self.eps 
                     else:
                         # Fallback for channels with all zeros or very few non-zero values
-                        scale_stats_per_channel[b, n, 0] = 1.0 + self.eps # Use a default scale of 1.0
+                        # Use a default scale of 1.0 + self.eps
+                        scale_stats_per_channel[b, n, 0] = 1.0 + self.eps
 
             self.scale_stat = scale_stats_per_channel.permute(0, 2, 1).detach() # Reshape back to [Batch, 1, NumFeatures]
 
@@ -118,22 +137,36 @@ class RevIN(nn.Module):
             
     def _normalize(self, x):
         """Applies the normalization."""
-        #print(f"DEBUG: RevIN._normalize - Input x (to normalize) stats: mean={x.mean():.6f}, std={x.std():.6f}, min={x.min():.6f}, max={x.max():.6f}")
-        #print(f"DEBUG: RevIN._normalize - location_stat (used for norm) stats: mean={self.location_stat.mean():.6f}, std={self.location_stat.std():.6f}, min={self.location_stat.min():.6f}, max={self.location_stat.max():.6f}")
-        #print(f"DEBUG: RevIN._normalize - scale_stat (used for norm) stats: mean={self.scale_stat.mean():.6f}, std={self.scale_stat.std():.6f}, min={self.scale_stat.min():.6f}, max={self.scale_stat.max():.6f}")
+        # --- Start Diagnostic Block ---
+        if torch.isnan(x).any():
+            print("!!! DIAGNOSTIC: NaN detected in input `x` to _normalize !!!")
+        if torch.isnan(self.location_stat).any():
+            print("!!! DIAGNOSTIC: NaN detected in `self.location_stat` in _normalize !!!")
+        if torch.isnan(self.scale_stat).any():
+            print("!!! DIAGNOSTIC: NaN detected in `self.scale_stat` in _normalize !!!")
+        
+        # Check for zero or near-zero scale
+        if (self.scale_stat < 1e-7).any():
+            print(f"!!! DIAGNOSTIC: Very small scale detected in _normalize. Min scale: {self.scale_stat.min().item()} !!!")
+            # Print the problematic scale values and their indices
+            problem_indices = (self.scale_stat < 1e-7).nonzero()
+            for idx in problem_indices:
+                print(f"  -> Problem at index {idx.cpu().numpy()}: scale={self.scale_stat[idx.split(1)].item()}")
+        # --- End Diagnostic Block ---
 
-        x_norm = (x - self.location_stat) / self.scale_stat
-
-        #print(f"DEBUG: RevIN._normalize - x_norm (after division) stats: mean={x_norm.mean():.6f}, std={x_norm.std():.6f}, min={x_norm.min():.6f}, max={x_norm.max():.6f}")
+        x_norm = (x - self.location_stat) / (self.scale_stat + self.eps)
+        
+        # --- NEW DIAGNOSTIC: Check x_norm immediately after division ---
+        if torch.isnan(x_norm).any() or torch.isinf(x_norm).any():
+            print("!!! DIAGNOSTIC: NaN/Inf detected in `x_norm` IMMEDIATELY AFTER DIVISION in _normalize !!!")
+            print(f"  -> x_norm stats: mean={x_norm.mean():.6f}, std={x_norm.std():.6f}, min={x_norm.min():.6f}, max={x_norm.max():.6f}")
+            print(f"  -> x stats: mean={x.mean():.6f}, std={x.std():.6f}, min={x.min():.6f}, max={x.max():.6f}")
+            print(f"  -> location_stat stats: mean={self.location_stat.mean():.6f}, std={self.location_stat.std():.6f}, min={self.location_stat.min():.6f}, max={self.location_stat.max():.6f}")
+            print(f"  -> scale_stat stats: mean={self.scale_stat.mean():.6f}, std={self.scale_stat.std():.6f}, min={self.scale_stat.min():.6f}, max={self.scale_stat.max():.6f}")
+        # --- End NEW DIAGNOSTIC ---
 
         if self.affine:
-            #print(f"DEBUG: RevIN._normalize - gamma (before affine) stats: mean={self.gamma.mean():.6f}, std={self.gamma.std():.6f}, min={self.gamma.min():.6f}, max={self.gamma.max():.6f}")
-            #print(f"DEBUG: RevIN._normalize - beta (before affine) stats: mean={self.beta.mean():.6f}, std={self.beta.std():.6f}, min={self.beta.min():.6f}, max={self.beta.max():.6f}")
-            
             x_norm = x_norm * self.gamma + self.beta
-
-            #print(f"DEBUG: RevIN._normalize - gamma (after affine) stats: mean={self.gamma.mean():.6f}, std={self.gamma.std():.6f}, min={self.gamma.min():.6f}, max={self.gamma.max():.6f}")
-            #print(f"DEBUG: RevIN._normalize - beta (after affine) stats: mean={self.beta.mean():.6f}, std={self.beta.std():.6f}, min={self.beta.min():.6f}, max={self.beta.max():.6f}")
            
         return x_norm
 
