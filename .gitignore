@@ -1,6 +1,7 @@
 dataset/more_csvs/
 result/
 results/
+runs/
 figures/
 .idea/
 .vscode/
@@ -30,3 +31,6 @@ inference_checkpoints/
 
 # no more checkpoints
 checkpoints/
+
+# debug output
+debug_output.txt

@@ -391,4 +391,3 @@ if __name__ == "__main__":
         print("No successful trials were completed.")
     print("\nTo analyze the results, use the 'analyse_study.py' script.")
     print("To visualize the Pareto front, use: optuna.visualization.plot_pareto_front(study)")
-")

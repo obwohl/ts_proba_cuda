@@ -63,7 +63,7 @@ class JohnsonSB_torch(Distribution):
         
         # --- FIX: Clamp the input to log to prevent numerical instability ---
         # Add a small epsilon to prevent log(0) or log(inf)
-        y_safe_for_log = torch.clamp(y, 1e-9, 1 - 1e-9)
+        y_safe_for_log = torch.clamp(y, 1e-7, 1 - 1e-7)
         
         z = self.gamma + self.delta * (y_safe_for_log / (1 - y_safe_for_log)).log()
         
